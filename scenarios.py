@@ -16,11 +16,11 @@ demo GIF shows the protocol instead of a silent repair.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
-from disruptions import AccidentEvent, EmergencyEvent
+from disruptions import AccidentEvent
 from planner import plan_agent, plan_to_path
 from reservation import ReservationTable
 from world import Cell, Task, World
@@ -165,4 +165,48 @@ def choke_showcase(n_agents: int = 4, seed: int = 0) -> dict:
         "n_agents": n_agents,
         "door": door,
     }
+
+
+
+# ----------------------------------------------------------------------
+# blockages that are guaranteed to bite
+# ----------------------------------------------------------------------
+def blockages_on_routes(plans: Dict[int, List], n: int,
+                        rng: np.random.Generator, *,
+                        lead: int = 3, duration: int = 6,
+                        t_min: int = 5) -> List:
+    """``n`` blockages placed *on* an agent's route (``SPEC`` 10).
+
+    :func:`disruptions.random_blockages` picks free cells at random, so most of
+    them are never driven through and produce no disruption at all.  Here each
+    cell is taken from an agent's own ``PlanStep`` sequence with a lead time
+    ``lead`` before the agent arrives, so the window always contains the step
+    and the repair loop really has to react -- which is what makes a
+    multi-pass case study (and its four repair cards) reproducible.
+    """
+    from disruptions import BlockageEvent
+
+    cand: List[tuple] = []
+    for aid in sorted(plans):
+        for s in (plans.get(aid) or []):
+            if s.t >= t_min and s.action in ("MOVE", "WAIT", "PICK", "DROP"):
+                cand.append((s.cell, s.t))
+    seen: set = set()
+    unique: List[tuple] = []
+    for cell, t in cand:                     # deterministic order, deduplicated
+        if cell in seen:
+            continue
+        seen.add(cell)
+        unique.append((cell, t))
+    if not unique:
+        return []
+    idx = rng.permutation(len(unique))
+    out: List = []
+    for i in idx:
+        if len(out) >= n:
+            break
+        cell, t = unique[int(i)]
+        out.append(BlockageEvent(cell, max(1, t - lead), duration))
+    out.sort(key=lambda e: (e.t0, e.cell))
+    return out
 

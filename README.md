@@ -27,6 +27,8 @@ python run_demo.py --disruptions 3 --accident 1 --emergency 2 --compare
 python run_demo.py --compare --mode negotiate      # one mode only
 python run_demo.py --compare --viz --outdir outputs  # + the figures (SPEC §11)
 python run_demo.py --choke --compare --viz         # corridor choke: the protocol speaks
+python experiments.py --quick                      # small SPEC §12 sweep
+python make_report.py --data outputs --zip         # PDF + Markdown + zip bundle
 
 PYTHONHASHSEED=0 python -m pytest -q               # full test suite
 ```
@@ -72,8 +74,10 @@ apply because the showcase injects its own outage on both halves of the clash.
 | `baselines.py` | the `global` baseline (the only global-planner caller) |
 | `viz.py` | trace frames, grid animation + GIF/MP4/snapshots, metrics panel, Gantt |
 | `viz_plan.py` | plan-space views: POP graph, before/after Gantt, repair cards, ladder |
-| `run_demo.py` | CLI demo / comparison table (+ `--viz` figures) |
-| `tests/` | 85 tests, including the stress-style multi-seed safety tests |
+| `run_demo.py` | CLI demo / comparison table (+ `--viz`, `--choke`) |
+| `experiments.py` | the `SPEC` §12 sweeps -> `results.csv`, `disruptions.csv`, figures |
+| `make_report.py` | the `SPEC` §15 report (PDF + Markdown) and the zip bundle |
+| `tests/` | 110+ tests, including the stress-style multi-seed safety tests |
 
 ## Repair in one page
 
@@ -128,6 +132,30 @@ metrics panel, the log panel and the cumulative line plot — and a bottom
 **fleet taskboard**, one cell per agent (phase, current task, target, delivery
 progress; wrapped over two rows past 20 agents).
 
+### What the symbols mean
+
+The panel explains itself: every export (GIF, MP4, screenshots, before/after
+view, the five freeze-frames and the repair cards) carries the on-grid legend
+built by `viz.grid_symbol_handles()` from the single vocabulary
+`viz.GRID_SYMBOLS` — `k` toggles it, `show_symbol_legend=False` hides it.
+
+| glyph | meaning |
+| --- | --- |
+| grey square | **shelf** (static obstacle; `0`/`1` of `World.grid`) |
+| coloured disc + id | **agent**; the ring colour is its altered category (`altered_plan` thick yellow, `altered_path` orange, `delayed_only` dotted, `unchanged` grey) |
+| small white square | agent **carrying a tote** (`carrying_task_id`) |
+| red `X` | **breakdown** (permanent, the R4 hand-off) |
+| hollow cyan **diamond** `D` | **pickup cell** of a task (`viz.PICKUP_C`) |
+| star `*` | **delivery cell** of a task, filled by status from `viz.TASK_STATUS_C`: grey `PENDING`, amber `PICKED`, green `DONE` |
+| red hatched square + number | dynamic **blockage**, the number is the **ticks left** |
+| pale solid arrow | **waiting for** — who is blocked by whom (`waiting_for`) |
+| dashed coloured arrow | **protocol message** (`PROPOSE_ORDER`, `PROPOSE_REROUTE`, `ACCEPT`, `REJECT`, `COMMIT`, `ABORT`; colour = `viz.MSG_COLORS[kind]`) |
+| rounded bubble over an agent | the **speech act** itself, sender `»` / receiver `«`, surplus folded into `+N` |
+
+The stars and diamonds are *task* markers, so a grid can show several of each:
+the diamond is where a tote must be picked up, the star where it must be
+delivered, and the star's colour is the live status of that task.
+
 ```python
 frames = viz.build_frames(world, final, tasks, parking, prev=cold,
                           events=events, records=records, log=log,
@@ -155,8 +183,9 @@ draws the honest "no negotiation needed" note instead).
 (rung, altered set, message counts) plus one line per speech act with its
 human-readable detail — so a silent run still shows *why* it stayed silent.
 `show_taskbar=False` (and `show_waiting`/`show_messages`/`show_future`/
-`show_message_labels`) hides each strip; `viz.interactive(frames, world)` gives
-keyboard playback (`space`, arrows, `p`, `g`, `m`, `c`, `d`, `l`, `s`). Every
+`show_message_labels`/`show_symbol_legend`) hides each strip;
+`viz.interactive(frames, world)` gives keyboard playback (`space`, arrows, `p`,
+`g`, `m`, `c`, `d`, `k`, `l`, `s`). Every
 agent that *sends or receives* a protocol message this tick also gets a rounded
 **speech bubble** over its disc (`viz.agent_message_labels`): the sender is
 marked `»`, the receiver `«`, the bubble is coloured by
@@ -179,6 +208,52 @@ what `scenarios.py` builds — `parked_holder_scenario` (the case asserted by
 `tests/test_negotiation.py`) and the `--choke` showcase — and why the plain demo
 honestly reports `0 messages`.
 
+## Experiments and report
+
+`experiments.py` runs the `SPEC` §12 sweeps.  The unit of work is a *family*
+(one `(N, density, seed)` instance); the world and the undisrupted plan are built
+**once** per family and then every mode sees the *identical* event list, so a
+`results.csv` row differs only by `mode`.  Families are independent, so
+`--jobs N` fans them out over a `multiprocessing.Pool`; all writes are sorted by
+`(mode, N, density, seed)`, so `--jobs 1` and `--jobs 8` produce byte-identical
+CSVs (a test asserts exactly that).
+
+* **Sweep A** — `N ∈ {5,10,20,30,40}` at 5% density; **sweep B** —
+  `density ∈ {0,2,5,10,15}%` at `N = 20`; **grid** — every combination;
+  the default is 10 seeds × 3 modes (`negotiate`, `self_only`, `global`).
+  `--quick` is a two-seed corner that finishes in seconds.
+* `density` scales the number of *dynamic blockages*
+  (`Config.n_blockages`: `round(density × free cells)`), on top of the
+  `n_breakdowns` accidents and `n_emergencies` emergencies.
+* `results.csv` has the full `SPEC` §12 column list (the four `altered_*`
+  mean/median/max triplets, `rung_histogram`, `messages_by_type`,
+  `pocl_nodes`, `st_astar_calls`, `success_rate`, `unfinished_agents`, …);
+  `disruptions.csv` has one row per repair pass.
+* `--plots` writes the trend curves (cost/makespan/altered/messages vs `N` and
+  vs density, with error bars), success-vs-density, the `(N, density)` heatmaps,
+  the per-disruption boxplot, the grouped mode bars, the stacked rung
+  histograms and `altered_plan` vs `altered_naive`.
+* `--ablations` adds the two extra `SPEC` §12 studies:
+  `radius_ablation.csv` + `comm_radius_ablation.png` (`comm_radius ∈ {3,6,9}`)
+  and `pocl_nodes.csv` + `pocl_nodes_vs_tasks.png` (POP action nodes and
+  grounding nodes vs tasks per agent).
+* `run_meta.json` records the command, the seed/`N`/density lists, the package
+  versions, the git commit and `PYTHONHASHSEED`, so a run can be audited — and
+  the documentation is honest about wall-clock (`mean_cpu_ms` is the only
+  non-reproducible column).
+
+`make_report.py` builds the `SPEC` §15 report from a **fresh** run (so it always
+works) and folds in the sweep artefacts when `--data outputs` holds a
+`results.csv`.  Case study **A** is a random warehouse with blockages placed *on
+the planned routes* (`scenarios.blockages_on_routes`, so each one really bites),
+two accidents and an emergency; case study **B** is the corridor choke point
+where the protocol must speak.  The bundle contains the POP figure, the Gantt
+chart, **four repair cards**, the freeze-frames, the ladder, the message
+sequence diagram and the altered table (mean/median/max under all four `SPEC`
+§9.5 definitions) — as `report.pdf` (reportlab), `report.md` (same content,
+GitHub-friendly) and `report_bundle.zip` (self-contained: figures included).
+
+## Disruption model
 ## Disruption model
 
 `disruptions.py` provides blockages (time windows written into the world),

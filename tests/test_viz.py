@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 
 import numpy as np
+from matplotlib.colors import to_rgba
 
 import viz
 import viz_plan
@@ -22,7 +23,7 @@ from peg import peg_solve
 from pocl import pocl
 from scenarios import choke_showcase
 from sim import simulate_scenario
-from world import assign_tasks, build_world
+from world import TaskStatus, assign_tasks, build_world
 
 
 # ----------------------------------------------------------------------
@@ -200,6 +201,14 @@ def test_ladder_figure_and_repair_cards(tmp_path):
     assert cards
     assert all(os.path.getsize(p) > 0 for p in cards)
 
+    # the "after repair" panel of a card explains the grid symbols too
+    import matplotlib.pyplot as plt
+    fig = viz_plan.repair_card(records[0], world=world, tasks=tasks,
+                               parking=parking, prev=plans, new=final)
+    assert [tx.get_text() for tx in fig.axes[-1].get_legend().get_texts()] == \
+        [lbl for _, lbl in viz.GRID_SYMBOLS]
+    plt.close(fig)
+
     frames = viz.build_frames(world, final, tasks, parking, prev=plans,
                               t_freeze=records[0].t, events=events,
                               records=records, traces=sim.traces)
@@ -361,3 +370,94 @@ def test_message_bubbles_are_drawn_and_can_be_switched_off():
     assert viz.plot_overview(sc["world"], frames, t,
                              show_message_labels=False).axes
     plt.close("all")
+
+# ----------------------------------------------------------------------
+# the grid symbol vocabulary (the legend that explains the GIF/PNG)
+# ----------------------------------------------------------------------
+def test_grid_symbol_handles_cover_the_vocabulary():
+    kinds = [kind for kind, _ in viz.GRID_SYMBOLS]
+    assert kinds == ["shelf", "agent", "tote", "breakdown", "pickup",
+                     "deliver_pending", "deliver_picked", "deliver_done",
+                     "blockage", "waiting", "message"]
+    handles = viz.grid_symbol_handles()
+    assert len(handles) == len(viz.GRID_SYMBOLS)
+    assert [h.get_label() for h in handles] == [lbl for _, lbl in
+                                                viz.GRID_SYMBOLS]
+    by_kind = dict(zip(kinds, handles))
+    # the pickup glyph is the hollow diamond, the delivery glyph the star
+    assert by_kind["pickup"].get_marker() == "D"
+    assert by_kind["deliver_done"].get_marker() == "*"
+    assert by_kind["breakdown"].get_marker() == "X"
+    # and their colours come from the same tables the drawing code uses
+    assert to_rgba(by_kind["pickup"].get_markeredgecolor()) == \
+        to_rgba(viz.PICKUP_C)
+    for kind, status in (("deliver_pending", TaskStatus.PENDING),
+                         ("deliver_picked", TaskStatus.PICKED),
+                         ("deliver_done", TaskStatus.DONE)):
+        assert to_rgba(by_kind[kind].get_markerfacecolor()) == \
+            to_rgba(viz.TASK_STATUS_C[status.value])
+
+
+def test_draw_tasks_uses_the_shared_status_table():
+    import matplotlib.pyplot as plt
+
+    frame = {"tasks": [
+        {"task_id": i, "status": st.value, "pickup": (i, 1),
+         "delivery": (i, 2)}
+        for i, st in enumerate((TaskStatus.PENDING, TaskStatus.PICKED,
+                                TaskStatus.DONE))]}
+    fig, ax = plt.subplots()
+    viz.draw_tasks(ax, frame)
+    stars = [ln for ln in ax.get_lines() if ln.get_marker() == "*"]
+    diamonds = [ln for ln in ax.get_lines() if ln.get_marker() == "D"]
+    assert len(stars) == len(diamonds) == 3
+    assert [to_rgba(ln.get_markerfacecolor()) for ln in stars] == [
+        to_rgba(viz.TASK_STATUS_C[st.value])
+        for st in (TaskStatus.PENDING, TaskStatus.PICKED, TaskStatus.DONE)]
+    assert all(to_rgba(ln.get_markerfacecolor()) == to_rgba("none")
+               for ln in diamonds), "the pickup diamond stays hollow"
+    plt.close(fig)
+
+
+def test_panel_carries_the_symbol_legend(tmp_path):
+    import matplotlib.pyplot as plt
+
+    (cfg, world, tasks, parking, plans, sim, records, final,
+     events) = _repaired()
+    frames = viz.build_frames(world, final, tasks, parking, prev=plans,
+                              t_freeze=4, events=events, records=records,
+                              traces=sim.traces)
+    t = len(frames) - 1
+
+    fig = plt.figure()
+    axes = viz.layout_overview(fig, world, frames, t)
+    leg = axes["grid"].get_legend()
+    assert leg is not None, "the grid must explain its own symbols"
+    assert [tx.get_text() for tx in leg.get_texts()] == \
+        [lbl for _, lbl in viz.GRID_SYMBOLS]
+    star_cols = {to_rgba(ln.get_markerfacecolor()) for ln in
+                 axes["grid"].get_lines() if ln.get_marker() == "*"}
+    assert star_cols <= {to_rgba(c) for c in viz.TASK_STATUS_C.values()}
+    out = str(tmp_path / "panel.png")
+    fig.savefig(out)
+    plt.close(fig)
+    assert os.path.getsize(out) > 0
+
+    fig2 = plt.figure()
+    axes2 = viz.layout_overview(fig2, world, frames, t,
+                                show_symbol_legend=False)
+    assert axes2["grid"].get_legend() is None
+    plt.close(fig2)
+
+    # the single-grid export and the before/after view explain them too
+    fig3 = viz.render_grid_frame(world, frames[t])
+    assert fig3.axes[0].get_legend() is not None
+    plt.close(fig3)
+    fig4 = viz.render_grid_frame(world, frames[t], show_symbol_legend=False)
+    assert fig4.axes[0].get_legend() is None
+    plt.close(fig4)
+    ba = viz.before_after_panels(world, frames, frames,
+                                 str(tmp_path / "ba.png"), t=t)
+    assert os.path.getsize(ba) > 0
+    plt.close("all")
+

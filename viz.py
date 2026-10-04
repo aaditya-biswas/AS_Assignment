@@ -9,7 +9,7 @@ without a display.  The entry points are
   category colours, repair log, counters);
 * :func:`plot_overview` -- grid + metrics panel + event log + cumulative line
   plot, the panel of the base animation;
-* :func:`render_grid_frame` -- the grid alone (used by the freeze-frames);
+* :func:`render_grid_frame` -- the grid alone, with the symbol legend;
 * :func:`render_gif`, :func:`render_mp4`, :func:`screenshots` -- the exports;
 * :func:`gantt` -- the per-agent Gantt chart;
 * :func:`before_after_panels` -- the v2 before/after view of one repair pass.
@@ -61,10 +61,45 @@ ACTION_C = {MOVE: "#2f81f7", WAIT: "#4a5a66", PICK: "#3fb950", DROP: "#d29922"}
 #: shelf map: 0 = free (background), 1 = shelf
 GRID_CMAP = ListedColormap([BG, SHELF_C])
 
+#: fill colour of a *delivery* star by task status (the pickup diamond is always
+#: hollow).  :func:`draw_tasks` and :func:`grid_symbol_handles` share this table
+#: so the drawing code and the on-grid legend can never disagree.
+TASK_STATUS_C = {TaskStatus.PENDING.value: "#7d8b96",
+                 TaskStatus.PICKED.value: "#d29922",
+                 TaskStatus.DONE.value: "#3fb950"}
+
+#: the on-grid symbol vocabulary of ``SPEC`` 11, as ``(kind, label)`` pairs;
+#: :func:`grid_symbol_handles` turns it into legend handles (and the README
+#: lists the same glyphs).  ``kind`` is the key used by the tests to look a
+#: particular symbol up.
+GRID_SYMBOLS: Tuple[Tuple[str, str], ...] = (
+    ("shelf", "shelf"),
+    ("agent", "agent (ring = altered cat.)"),
+    ("tote", "carrying tote"),
+    ("breakdown", "breakdown"),
+    ("pickup", "pickup cell"),
+    ("deliver_pending", "deliver: pending"),
+    ("deliver_picked", "deliver: picked"),
+    ("deliver_done", "deliver: done"),
+    ("blockage", "blockage (ticks left)"),
+    ("waiting", "waiting for"),
+    ("message", "message (colour = type)"),
+)
+
 #: how long a negotiation arrow stays visible in the animation
 MESSAGE_HOLD = 6
 #: dotted future paths are truncated to this many ticks
 FUTURE_TICKS = 30
+
+#: Playback rate of the GIF/MP4 export (and of :func:`interactive`).  One
+#: animation frame == one simulated tick, so this is really "how many ticks per
+#: second the viewer sees".  It is deliberately slow: the panel carries a lot of
+#: text (speech bubbles, message abbreviations, waiting arrows) and the
+#: ``--choke`` pass only speaks for a handful of ticks, so 4 fps (0.25 s per
+#: tick) is about the fastest rate at which the dialogue can still be read.
+#: Every animation entry point defaults to this constant; pass ``fps=`` (or
+#: ``run_demo.py --fps``) to override it.
+ANIM_FPS = 4
 
 #: colour of a protocol message by type (``negotiation.MESSAGE_TYPES``)
 MSG_COLORS = {"PROPOSE_ORDER": "#ffd54f", "PROPOSE_REROUTE": "#ffb74d",
@@ -409,18 +444,79 @@ def grid_ax(ax, world: World, title: Optional[str] = None) -> None:
 
 
 def draw_tasks(ax, frame: dict) -> None:
-    """Pickup diamonds and delivery stars, coloured by task status."""
-    stat_c = {TaskStatus.PENDING.value: "#7d8b96",
-              TaskStatus.PICKED.value: "#d29922",
-              TaskStatus.DONE.value: "#3fb950"}
+    """Pickup diamonds and delivery stars, coloured by task status.
+
+    The pickup cell of a task is a hollow diamond (:data:`PICKUP_C`); its
+    delivery cell is a star filled from :data:`TASK_STATUS_C` (grey pending,
+    amber picked, green done).  :func:`grid_symbol_handles` documents both
+    glyphs in the grid legend, from the same tables.
+    """
     for tk in frame["tasks"]:
-        col = stat_c.get(tk["status"], "#7d8b96")
+        col = TASK_STATUS_C.get(tk["status"], "#7d8b96")
         pr, pc = tk["pickup"]
         ax.plot(pc, pr, marker="D", ms=5, mfc="none", mec=PICKUP_C, mew=1.1,
                 zorder=3)
         dr, dc = tk["delivery"]
         ax.plot(dc, dr, marker="*", ms=8, mfc=col, mec=DELIVER_C, mew=0.7,
                 alpha=0.9, zorder=3)
+
+
+def grid_symbol_handles() -> List:
+    """One legend handle per symbol of the grid panel (``SPEC`` 11 vocabulary).
+
+    The single source of truth for :data:`GRID_SYMBOLS`, and therefore for the
+    grid legend of :func:`layout_overview` / :func:`render_grid_frame`, the
+    README and the tests.  Every glyph is explained on the figure itself:
+    the shelf square, the agent disc (ring = altered category), the carried
+    tote, the breakdown ``X``, the hollow pickup *diamond*, the three delivery
+    *star* states, the hatched blockage square (its number is the ticks left),
+    the waiting arrow and the protocol-message arrow.  Colours come from the
+    same constants the drawing code uses, so legend and grid cannot drift.
+    """
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+
+    def star(colour: str, label: str) -> "Line2D":
+        return Line2D([], [], marker="*", ls="none", ms=9, mfc=colour,
+                      mec=DELIVER_C, mew=0.7, label=label)
+
+    make = {
+        "shelf": lambda lbl: Patch(fc=SHELF_C, ec=GRID_C, lw=0.6, label=lbl),
+        "agent": lambda lbl: Line2D([], [], marker="o", ls="none", ms=7,
+                                    mfc="#39424a",
+                                    mec=CAT_STYLE[UNCHANGED]["ec"], mew=0.8,
+                                    label=lbl),
+        "tote": lambda lbl: Line2D([], [], marker="s", ls="none", ms=5,
+                                   mfc="#f0f6fc", mec="none", label=lbl),
+        "breakdown": lambda lbl: Line2D([], [], marker="X", ls="none", ms=7,
+                                        mfc="none", mec="#ff5c4d", mew=1.6,
+                                        label=lbl),
+        "pickup": lambda lbl: Line2D([], [], marker="D", ls="none", ms=5,
+                                     mfc="none", mec=PICKUP_C, mew=1.1,
+                                     label=lbl),
+        "deliver_pending": lambda lbl: star(
+            TASK_STATUS_C[TaskStatus.PENDING.value], lbl),
+        "deliver_picked": lambda lbl: star(
+            TASK_STATUS_C[TaskStatus.PICKED.value], lbl),
+        "deliver_done": lambda lbl: star(
+            TASK_STATUS_C[TaskStatus.DONE.value], lbl),
+        "blockage": lambda lbl: Patch(fc=BLOCK_C, alpha=0.35, hatch="///",
+                                      ec=BLOCK_C, lw=0.8, label=lbl),
+        "waiting": lambda lbl: Line2D([], [], color="#c9d1d9", lw=0.7,
+                                      alpha=0.7, label=lbl),
+        "message": lambda lbl: Line2D([], [], color="#ffd54f", lw=1.0, ls=":",
+                                      alpha=0.9, label=lbl),
+    }
+    return [make[kind](label) for kind, label in GRID_SYMBOLS]
+
+
+def draw_symbol_legend(ax) -> None:
+    """The compact symbol legend drawn in the corner of the grid axes."""
+    ax.legend(handles=grid_symbol_handles(), fontsize=5.0, ncol=3,
+              loc="lower right", framealpha=0.55, facecolor=PANEL,
+              labelcolor=FG, edgecolor=GRID_C, borderpad=0.4,
+              handletextpad=0.5, columnspacing=0.8, handlelength=1.4,
+              labelspacing=0.3)
 
 
 def draw_blocked(ax, frame: dict) -> None:
@@ -688,6 +784,7 @@ def layout_overview(fig, world: World, frames: Sequence[dict], t: int, *,
                     title: Optional[str] = None, show_future: bool = True,
                     show_waiting: bool = True, show_messages: bool = True,
                     show_message_labels: bool = True,
+                    show_symbol_legend: bool = True,
                     show_taskbar: bool = True,
                     show_dialogue: bool = False) -> dict:
     """Draw the SPEC 11 panel of tick ``t`` onto the *existing* figure ``fig``.
@@ -697,7 +794,10 @@ def layout_overview(fig, world: World, frames: Sequence[dict], t: int, *,
     code is shared by the GIF, the MP4 and the PNG screenshots.  The bottom
     strip is the per-agent *taskboard* (what every robot is doing right now);
     the log panel shows the event log or, with ``show_dialogue``, the protocol
-    dialogue.
+    dialogue; with ``show_symbol_legend`` the grid carries the glyph legend
+    (:func:`grid_symbol_handles`: shelf, agent, pickup *diamond*, delivery
+    *star*, breakdown ``X``, blockage, waiting/message arrows), so every export
+    explains its own symbols.
     """
     fig.set_facecolor(BG)
     frame = frame_at(frames, t)
@@ -717,6 +817,8 @@ def layout_overview(fig, world: World, frames: Sequence[dict], t: int, *,
     draw_agents(ax_grid, frame, show_future=show_future,
                 show_waiting=show_waiting, show_messages=show_messages,
                 show_message_labels=show_message_labels)
+    if show_symbol_legend:
+        draw_symbol_legend(ax_grid)
 
     ax_m.set_facecolor(PANEL)
     ax_m.axis("off")
@@ -762,19 +864,21 @@ def plot_overview(world: World, frames: Sequence[dict], t: int, *,
 
 
 def interactive(frames: Sequence[dict], world: World, *,
-                figsize: Tuple[float, float] = (16, 9), fps: int = 8,
+                figsize: Tuple[float, float] = (16, 9), fps: int = ANIM_FPS,
                 title: Optional[str] = None):
     """Keyboard-driven playback of the panel (needs a GUI backend).
 
     Keys: space play/pause, ``left``/``right`` step, ``p`` future paths,
     ``g`` waiting arrows, ``m`` message arrows, ``c`` message bubbles,
-    ``d`` taskboard, ``l`` event log <-> protocol dialogue, ``s`` save a PNG.
+    ``d`` taskboard, ``k`` symbol legend, ``l`` event log <-> protocol
+    dialogue, ``s`` save a PNG.  ``fps`` is the playback rate (default
+    :data:`ANIM_FPS`, i.e. 0.25 s per tick).
     """
     from matplotlib.animation import FuncAnimation
 
     st = {"t": 0, "play": True, "future": True, "waiting": True,
           "messages": True, "msgtext": True, "taskbar": True,
-          "dialogue": False}
+          "symbols": True, "dialogue": False}
     fig = plt.figure(figsize=figsize)
 
     def draw(_t=None):
@@ -782,6 +886,7 @@ def interactive(frames: Sequence[dict], world: World, *,
                         show_future=st["future"], show_waiting=st["waiting"],
                         show_messages=st["messages"],
                         show_message_labels=st["msgtext"],
+                        show_symbol_legend=st["symbols"],
                         show_taskbar=st["taskbar"],
                         show_dialogue=st["dialogue"])
         return []
@@ -812,6 +917,8 @@ def interactive(frames: Sequence[dict], world: World, *,
             st["msgtext"] = not st["msgtext"]
         elif k == "d":
             st["taskbar"] = not st["taskbar"]
+        elif k == "k":
+            st["symbols"] = not st["symbols"]
         elif k == "l":
             st["dialogue"] = not st["dialogue"]
         elif k == "s":
@@ -829,7 +936,8 @@ def interactive(frames: Sequence[dict], world: World, *,
 def render_grid_frame(world: World, frame: dict, *,
                       figsize: Tuple[float, float] = (8, 8),
                       title: Optional[str] = None,
-                      show_message_labels: bool = True) -> "plt.Figure":
+                      show_message_labels: bool = True,
+                      show_symbol_legend: bool = True) -> "plt.Figure":
     """A single grid panel (used by the freeze-frames of a repair pass)."""
     fig = plt.figure(figsize=figsize, facecolor=BG)
     ax = fig.add_subplot(111)
@@ -837,6 +945,8 @@ def render_grid_frame(world: World, frame: dict, *,
     draw_tasks(ax, frame)
     draw_blocked(ax, frame)
     draw_agents(ax, frame, show_message_labels=show_message_labels)
+    if show_symbol_legend:
+        draw_symbol_legend(ax)
     fig.tight_layout()
     return fig
 
@@ -867,10 +977,14 @@ def _animation(frames: Sequence[dict], world: World, figsize, title, fps):
 
 
 def render_gif(frames: Sequence[dict], world: World, path: str, *,
-               fps: int = 8, figsize: Tuple[float, float] = (16, 9),
+               fps: int = ANIM_FPS, figsize: Tuple[float, float] = (16, 9),
                title: Optional[str] = None, dpi: int = 100,
                max_frames: Optional[int] = None) -> str:
     """Write the animation as a GIF (PillowWriter); returns ``path``.
+
+    The GIF runs for ``len(frames) / fps`` seconds; the default ``fps`` is
+    :data:`ANIM_FPS` (4), i.e. twice as long as a plain 8 fps export, so the
+    speech bubbles and message arrows can be read while it plays.
 
     ``max_frames`` subsamples very long schedules (every k-th tick) so the GIF
     stays small.
@@ -887,9 +1001,13 @@ def render_gif(frames: Sequence[dict], world: World, path: str, *,
 
 
 def render_mp4(frames: Sequence[dict], world: World, path: str, *,
-               fps: int = 8, figsize: Tuple[float, float] = (16, 9),
+               fps: int = ANIM_FPS, figsize: Tuple[float, float] = (16, 9),
                title: Optional[str] = None, dpi: int = 100) -> str:
-    """Write the animation as an MP4 (needs ``ffmpeg``); returns ``path``."""
+    """Write the animation as an MP4 (needs ``ffmpeg``); returns ``path``.
+
+    ``fps`` defaults to :data:`ANIM_FPS`, the same slow playback rate as the
+    GIF export, so both videos last ``len(frames) / fps`` seconds.
+    """
     if not FFMpegWriter.isAvailable():
         raise RuntimeError("ffmpeg is not available: cannot write MP4")
     _ensure_dir(path)
@@ -998,7 +1116,12 @@ def before_after_panels(world: World, before: Sequence[dict],
                         after: Sequence[dict], path: str, *, t: int = 0,
                         figsize: Tuple[float, float] = (16, 9),
                         dpi: int = 100) -> str:
-    """Side-by-side grid panels (pre- vs post-repair) written to ``path``."""
+    """Side-by-side grid panels (pre- vs post-repair) written to ``path``.
+
+    The right-hand panel carries the symbol legend
+    (:func:`grid_symbol_handles`), so the exported PNG explains the pickup
+    diamonds, the delivery stars and the rest of the glyph vocabulary.
+    """
     fig = plt.figure(figsize=figsize, facecolor=BG)
     for k, (name, frames) in enumerate((("before repair", before),
                                         ("after repair", after))):
@@ -1007,6 +1130,8 @@ def before_after_panels(world: World, before: Sequence[dict],
         grid_ax(ax, world, f"{name}   t={frame['t']}")
         draw_tasks(ax, frame)
         draw_agents(ax, frame, show_waiting=False)
+        if k == 1:
+            draw_symbol_legend(ax)
     fig.tight_layout()
     _ensure_dir(path)
     fig.savefig(path, dpi=dpi, facecolor=BG)

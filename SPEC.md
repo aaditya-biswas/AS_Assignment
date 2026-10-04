@@ -337,9 +337,19 @@ shelves/parking, interpolated agent motion, pickup/delivery markers, carried
 item, dotted future paths (toggle `p`), red hatched blocked cells with
 countdown, breakdown X, emergency ring, message arrows, metrics panel, event
 log, cumulative line plot. Keys: space, arrows, `+/-`, `p`, `m`, `s`, and v2's
-`g` (waiting arrows), `m` (message arrows), `c` (message bubbles), `d` (taskboard), `l` (log <->>
+`g` (waiting arrows), `m` (message arrows), `c` (message bubbles), `d` (taskboard),
+`k` (symbol legend), `l` (log <->>
 protocol dialogue), `n` (cycle agent), `o` (POP panel), `r` (replay phases),
 `t` (Gantt).
+
+The grid carries its own **symbol legend** (`viz.grid_symbol_handles()`, from
+the vocabulary `viz.GRID_SYMBOLS`) so a GIF/PNG explains itself: shelf square;
+agent disc (ring = altered category); carried-tote square; breakdown `X`;
+**hollow diamond** = pickup cell (`viz.PICKUP_C`); **star** = delivery cell,
+filled by task status (`viz.TASK_STATUS_C`: pending/picked/done); hatched
+blockage square with the ticks left; waiting arrow; dashed coloured
+protocol-message arrow (colour = `viz.MSG_COLORS[kind]`).  `k` toggles it
+(and `show_symbol_legend=False` suppresses it programmatically).
 
 v2 additions: waiting-for arrows (thin arrow to the `res` predecessor),
 altered-category colours (altered_plan = thick yellow, delayed_only = thin

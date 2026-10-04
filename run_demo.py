@@ -54,8 +54,10 @@ def main() -> int:
                          "repair cards, ladder, POP) into --outdir")
     ap.add_argument("--outdir", default="outputs",
                     help="directory for --viz artefacts (default: outputs)")
-    ap.add_argument("--fps", type=int, default=8,
-                    help="frames per second of the GIF/MP4 export")
+    ap.add_argument("--fps", type=int, default=None,
+                    help="frames per second of the GIF/MP4 export (default: "
+                         "viz.ANIM_FPS = 4, i.e. 0.25 s per tick, so the "
+                         "protocol dialogue can be read while it plays)")
     ap.add_argument("--choke", action="store_true",
                     help="run the corridor choke-point showcase instead of the "
                          "random warehouse: the single door forces the agents "
@@ -242,6 +244,7 @@ def _write_figures(args, world, before, after, per_agent, parking, records,
 
     out = os.path.join(args.outdir, mode)
     os.makedirs(out, exist_ok=True)
+    fps = int(args.fps or viz.ANIM_FPS)
     tasks = [tk for lst in per_agent for tk in lst]
     disrupted = sorted({a for r in records for a in r.altered_plan_ids})
     frames = viz.build_frames(world, after, tasks, parking, prev=before,
@@ -249,7 +252,7 @@ def _write_figures(args, world, before, after, per_agent, parking, records,
                               disrupted=disrupted, events=events,
                               records=records, log=log, traces=sim.traces)
     gif = viz.render_gif(frames, world, os.path.join(out, "animation.gif"),
-                         fps=args.fps, max_frames=200)
+                         fps=fps, max_frames=200)
     shots = viz.screenshots(frames, world, out, prefix="shot")
     fig = viz.gantt(after, categories=frames[-1]["categories"],
                     t_freeze=records[0].t if records else None)

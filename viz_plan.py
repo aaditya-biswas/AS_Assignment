@@ -184,13 +184,21 @@ def _plan_frames(world: World, plans, tasks, parking, t_freeze: int,
 
 
 def _scene(ax, world: World, frames: Sequence[dict], t: int,
-           title: str) -> None:
+           title: str, legend: bool = False) -> None:
+    """One grid panel of a repair card (routes + tasks + events).
+
+    With ``legend`` the panel also carries the grid symbol vocabulary
+    (:func:`viz.draw_symbol_legend`) -- the "after repair" panel uses it so a
+    card explains its own pickup diamonds and delivery stars.
+    """
     """One grid panel of a repair card (routes + tasks + events)."""
     frame = viz.frame_at(frames, t)
     viz.grid_ax(ax, world, title)
     viz.draw_tasks(ax, frame)
     viz.draw_blocked(ax, frame)
     viz.draw_agents(ax, frame)
+    if legend:
+        viz.draw_symbol_legend(ax)
 
 
 def _record_text(rec) -> str:
@@ -243,7 +251,7 @@ def repair_card(record, *, world: World, tasks=(), parking=(), prev=None,
     if new is not None:
         frames = _plan_frames(world, new, tasks, parking, t)
         _scene(fig.add_subplot(gs[0, 2]), world, frames, t,
-               f"after repair   t={t}")
+               f"after repair   t={t}", legend=True)
     fig.subplots_adjust(left=0.01, right=0.99, top=0.94, bottom=0.04)
     return fig
 
