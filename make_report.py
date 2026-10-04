@@ -6,6 +6,11 @@ the altered-per-disruption table -- plus the experiment tables and plots of
 **fresh** run, so the report can always be built; the figures are copied into
 the bundle, so the zip is self-contained.
 
+The report names the GitHub repository of the deliverable (``git remote
+get-url origin``, :data:`REPO_URL` as fallback): as a clickable link near the
+top of the PDF -- and in the footer of every page, so the link survives being
+printed.
+
 Usage::
 
     python make_report.py --zip                       # -> outputs/report/
@@ -25,13 +30,20 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from config import Config
-from disruptions import AccidentEvent, EmergencyEvent
 from negotiation import Negotiation
-from peg import peg_solve
 from pocl import pocl
-from scenarios import blockages_on_routes, choke_showcase
-from sim import plan_makespan, simulate_scenario
-from world import World, assign_tasks, build_world
+from run_demo import (DEFAULT_AGENTS, DEFAULT_BLOCKAGES, DEFAULT_HW,
+                      DEFAULT_SEED)
+from scenarios import choke_showcase, warehouse_shift
+from sim import simulate_scenario
+from world import World
+
+#: the vetted seed of the shipped warehouse shift: the seed of the demo
+#: defaults whose every repair mode finishes in seconds and whose panel really
+#: shows all five counters -- 12/12 agents altered, 17 protocol messages, 9
+#: disruptions, 4 closed lanes and queueing pairs.  ``run_demo.py`` defaults to
+#: the same seed, so the report and the animation show the same run.
+DEMO_SEED = DEFAULT_SEED
 
 #: the four ``SPEC`` 9.5 definitions and the ``RepairRecord`` list field behind
 DEFINITIONS = (("altered_plan", "altered_plan_ids"),
@@ -43,36 +55,80 @@ DEFINITIONS = (("altered_plan", "altered_plan_ids"),
 # ----------------------------------------------------------------------
 # the two case studies
 # ----------------------------------------------------------------------
-def gather(seed: int = 0, mode: str = "negotiate", *, n_agents: int = 8,
-           tasks_per_agent: int = 2, hw: int = 28, disruptions: int = 5
-           ) -> dict:
-    """A random warehouse with route blockages, accidents and an emergency."""
+def gather(seed: int = DEMO_SEED, mode: str = "negotiate", *,
+           n_agents: int = 12, tasks_per_agent: int = 2, hw: int = 16,
+           disruptions: int = 6, breakdowns: int = 2,
+           emergencies: int = 1) -> dict:
+    """The demo's congested, disrupted warehouse (``SPEC`` 10 / 15).
+
+    One cross-aisle is closed for maintenance
+    (:func:`scenarios.aisle_closure_grid`), so the fleet funnels through a
+    single door, and the shift starts with closed lanes, two robots down and one
+    diversion (:func:`scenarios.warehouse_profile`).  The instance comes from
+    :func:`scenarios.warehouse_shift` -- the very same call ``run_demo.py``
+    makes with its defaults -- so every panel of the report carries live
+    counters (altered agents, protocol messages, disruptions, blocked cells and
+    waiting pairs) instead of the five zeros of an "all clear" run, and the
+    report can never drift from the animated demo.
+    """
     cfg = Config(H=hw, W=hw, n_agents=n_agents,
                  tasks_per_agent=tasks_per_agent, seed=seed)
-    rng = np.random.default_rng(cfg.seed)
-    world, tasks, parking = build_world(cfg, rng)
-    per_agent = assign_tasks(tasks, parking, rng)
-    plans, failed = peg_solve(world, per_agent, parking,
-                              max_nodes=cfg.pocl_max_nodes)
-    horizon = max(20, plan_makespan(plans))
-    # blockages *on* the routes, so each one really bites (see scenarios.py)
-    block = blockages_on_routes(plans, disruptions, rng)
-    acc = [AccidentEvent(0, max(2, horizon // 6), 6),
-           AccidentEvent(min(3, n_agents - 1), max(3, horizon // 2), 6)]
-    emg = [EmergencyEvent(min(1, n_agents - 1), max(4, horizon // 4), 4)]
+    shift = warehouse_shift(cfg, np.random.default_rng(cfg.seed),
+                            n_blockages=disruptions, n_breakdowns=breakdowns,
+                            n_emergencies=emergencies,
+                            max_nodes=cfg.pocl_max_nodes)
+    world, tasks, parking = shift["world"], shift["tasks"], shift["parking"]
+    plans, failed = shift["plans"], shift["failed"]
+    profile = shift["profile"]
+    block, acc, emg = (profile["blockages"], profile["accidents"],
+                       profile["emergencies"])
     log = Negotiation(t=0)
     sim, records, final = simulate_scenario(
         world, {a: (list(s) if s else None) for a, s in plans.items()},
-        per_agent, parking, mode=mode, blockages=list(block), accidents=acc,
-        emergencies=emg, total_tasks=cfg.n_tasks, comm_radius=cfg.comm_radius,
-        delay_threshold=cfg.delay_threshold, lambda_soft=cfg.lambda_soft,
-        max_depth=cfg.max_depth, beta_alter=cfg.beta_alter, message_log=log,
-        record_traces=True)
-    return {"name": f"{mode}, {hw}x{hw} grid, N={n_agents}",
+        shift["per_agent"], parking, mode=mode, blockages=list(block),
+        accidents=acc, emergencies=emg, total_tasks=cfg.n_tasks,
+        comm_radius=cfg.comm_radius, delay_threshold=cfg.delay_threshold,
+        lambda_soft=cfg.lambda_soft, max_depth=cfg.max_depth,
+        beta_alter=cfg.beta_alter, message_log=log, record_traces=True)
+    events = list(block) + list(acc) + list(emg)
+    frames = _frames(world, final, tasks, parking, plans, records, log, events,
+                     sim, disrupted=sorted({a for r in records
+                                            for a in r.altered_plan_ids}))
+    return {"name": f"{mode}, {hw}x{hw} grid (aisle closed), N={n_agents}",
             "cfg": cfg, "world": world, "tasks": tasks, "parking": parking,
-            "per_agent": per_agent, "before": plans, "after": final, "sim": sim,
-            "records": records, "log": log,
-            "events": list(block) + acc + emg, "failed_init": len(failed)}
+            "per_agent": shift["per_agent"], "before": plans, "after": final,
+            "sim": sim, "records": records, "log": log, "events": events,
+            "failed_init": len(failed), "frames": frames,
+            "counters": activity_counters(frames)}
+
+
+#: the five ``SPEC`` 11 activity counters, in the order the metrics panel shows
+COUNTER_KEYS = (("altered_so_far", "altered agents"),
+                ("messages_so_far", "protocol messages"),
+                ("disruptions_so_far", "disruptions"),
+                ("blocked_peak", "blocked cells (peak)"),
+                ("waiting_peak", "waiting pairs (peak)"))
+
+
+def activity_counters(frames: Sequence[dict]) -> Dict[str, int]:
+    """The worst case the metrics panel reached: ``max`` over the run.
+
+    Two of the five counters are *instantaneous* (live blocked cells, live
+    waiting pairs) and drop back to zero once the disruption is over, which is
+    why the panel and the report quote their peak as well.
+    """
+    return {k: max(f["counters"][k] for f in frames) for k, _ in COUNTER_KEYS}
+
+
+def _frames(world, final, tasks, parking, plans, records, log, events, sim, *,
+            disrupted) -> List[dict]:
+    """The trace frames of one case study (shared by ``gather`` and ``figures``)."""
+    import viz
+
+    return viz.build_frames(world, final, tasks, parking, prev=plans,
+                            t_freeze=records[0].t if records else 0,
+                            disrupted=disrupted, events=events,
+                            records=records, log=log, traces=sim.traces)
 
 
 def gather_choke(n_agents: int = 4, seed: int = 0) -> dict:
@@ -90,13 +146,17 @@ def gather_choke(n_agents: int = 4, seed: int = 0) -> dict:
         comm_radius=cfg.comm_radius, delay_threshold=cfg.delay_threshold,
         lambda_soft=cfg.lambda_soft, max_depth=cfg.max_depth,
         beta_alter=cfg.beta_alter, message_log=log, record_traces=True)
+    tasks = [tk for lst in sc["per_agent"] for tk in lst]
+    disrupted = sorted({a for r in records for a in r.altered_plan_ids})
+    frames = _frames(sc["world"], final, tasks, sc["parking"], sc["plans"],
+                     records, log, list(sc["accidents"]), sim,
+                     disrupted=disrupted)
     return {"name": f"choke corridor, N={n_agents}", "cfg": cfg,
-            "world": sc["world"],
-            "tasks": [tk for lst in sc["per_agent"] for tk in lst],
-            "parking": list(sc["parking"]), "per_agent": sc["per_agent"],
-            "before": sc["plans"], "after": final, "sim": sim,
-            "records": records, "log": log, "events": list(sc["accidents"]),
-            "failed_init": 0}
+            "world": sc["world"], "tasks": tasks, "parking": list(sc["parking"]),
+            "per_agent": sc["per_agent"], "before": sc["plans"], "after": final,
+            "sim": sim, "records": records, "log": log,
+            "events": list(sc["accidents"]), "failed_init": 0,
+            "frames": frames, "counters": activity_counters(frames)}
 
 
 # ----------------------------------------------------------------------
@@ -114,11 +174,9 @@ def figures(case: dict, outdir: str, sub: str = "repair") -> Dict[str, str]:
     records, before, after = case["records"], case["before"], case["after"]
     t_freeze = records[0].t if records else 0
     disrupted = sorted({a for r in records for a in r.altered_plan_ids})
-    frames = viz.build_frames(case["world"], after, case["tasks"],
-                              case["parking"], prev=before, t_freeze=t_freeze,
-                              disrupted=disrupted, events=case["events"],
-                              records=records, log=case["log"],
-                              traces=case["sim"].traces)
+    frames = case.get("frames") or _frames(
+        case["world"], after, case["tasks"], case["parking"], before, records,
+        case["log"], case["events"], case["sim"], disrupted=disrupted)
     paths: Dict[str, str] = {}
 
     def rel(name: str) -> str:
@@ -205,10 +263,29 @@ def case_summary(case: dict) -> Dict[str, object]:
         "conflict_free": "yes" if sim.conflict_free else f"{len(sim.violations)} viol",
         "repairs": len(records),
         "altered_plan_total": sum(len(r.altered_plan_ids) for r in records),
-        "messages": sum(sum(r.messages_by_type.values()) for r in records),
+        #: the true size of the dialogue: ``messages_by_type`` is *cumulative*
+        #: (the histogram of the log at the time of the record, which is what
+        #: the metrics panel shows as "messages so far"), so the headline count
+        #: comes from the log itself -- otherwise it would be counted once per
+        #: record.
+        "messages": len(getattr(case.get("log"), "messages", ()) or ()),
         "rungs": rung_histogram(records),
         "failed_init": case["failed_init"],
+        #: the five ``SPEC`` 11 activity counters, at their peak over the run
+        "counters": dict(case.get("counters") or {}),
     }
+
+
+def counters_table(summary: dict) -> tuple:
+    """The five activity counters of one run -- the panel of ``SPEC`` 11.
+
+    The report quotes them as the *peak* reached, because the two instantaneous
+    ones (live blocked cells, live waiting pairs) fall back to zero after the
+    last disruption has been repaired.
+    """
+    counters = summary.get("counters") or {}
+    rows = [[label, counters.get(key, "-")] for key, label in COUNTER_KEYS]
+    return ("table", ("metrics-panel counter", "peak in this run"), rows)
 
 
 
@@ -267,6 +344,20 @@ ARCH_TABLE = (
 )
 
 
+def _counters_sentence(summary: dict) -> str:
+    """One sentence stating that the shipped shift really exercises the panel."""
+    c = summary.get("counters") or {}
+    if not c:
+        return ""
+    return ("None of the five metrics-panel counters is zero in this run: "
+            f"{c.get('altered_so_far', 0)} altered agents, "
+            f"{c.get('messages_so_far', 0)} protocol messages, "
+            f"{c.get('disruptions_so_far', 0)} disruptions, up to "
+            f"{c.get('blocked_peak', 0)} closed cells at once and up to "
+            f"{c.get('waiting_peak', 0)} queueing pairs at once. The animated "
+            "GIF of the same shift is `outputs/negotiate/animation.gif`.")
+
+
 def _summary_table(summary: dict) -> tuple:
     keys = ("case", "tasks", "makespan", "conflict_free", "repairs",
             "altered_plan_total", "messages", "rungs", "failed_init")
@@ -288,8 +379,17 @@ def _blocks_case_a(cases, figsets, summaries, altered_rows) -> List[tuple]:
                      "repair."))
     out.append(("h2", "2. Three-layer architecture"))
     out.append(("table", ARCH_TABLE[0], [list(r) for r in ARCH_TABLE[1:]]))
-    out.append(("h2", "3. Case study A: random warehouse"))
+    out.append(("h2", "3. Case study A: congested warehouse (aisle closed)"))
+    out.append(("p", "One cross-aisle is closed for maintenance, so the fleet "
+                     "funnels through a single door, and the shift starts with "
+                     "closed lanes, robots down and one emergency diversion. "
+                     "That is the shift `run_demo.py` animates, so the panels "
+                     "show live counters (altered agents, protocol messages, "
+                     "disruptions, blocked cells, waiting pairs) rather than "
+                     "the five zeros of an all-clear run."))
     out.append(_summary_table(summaries[0]))
+    out.append(counters_table(summaries[0]))
+    out.append(("p", _counters_sentence(summaries[0])))
     for key, caption in (("pop", "A POP of an altered agent (L1)."),
                          ("gantt", "Per-agent Gantt of the repaired schedule."),
                          ("dialogue", "Metrics panel with the protocol dialogue."),
@@ -310,7 +410,7 @@ def _blocks_case_a(cases, figsets, summaries, altered_rows) -> List[tuple]:
                  for n, m, d, mx in altered_rows[0]]))
     out.append(("table", ("t", "event", "rung", "altered_plan", "altered_path",
                           "delayed_only", "altered_naive", "added_delay",
-                          "messages", "cpu_ms", "success"),
+                          "messages (cumulative)", "cpu_ms", "success"),
                 per_disruption_table(cases[0]["records"])))
     return out
 
@@ -320,10 +420,13 @@ def _blocks_case_b(cases, figsets, summaries) -> List[tuple]:
     out: List[tuple] = [("h2", "5. Case study B: the corridor choke point")]
     out.append(("p", "A single-door corridor forces a clash, so the ladder finds "
                      "no hard candidate and the initiator negotiates a grant "
-                     "(rung R2): PROPOSE_REROUTE -> ACCEPT -> COMMIT. This is "
-                     "the case that makes the protocol visible -- and why the "
-                     "plain, open-warehouse demo is honestly silent."))
+                     "(rung R2): PROPOSE_REROUTE -> ACCEPT -> COMMIT. Case A "
+                     "now speaks too -- the closed aisle funnels the fleet "
+                     "through one door, so holders clash and the protocol "
+                     "answers -- but the corridor remains the minimal instance "
+                     "where a repair *cannot* be a silent local detour."))
     out.append(_summary_table(summaries[1]))
+    out.append(counters_table(summaries[1]))
     for key, caption in (("sequence", "The message sequence diagram of the pass."),
                          ("ladder", "The R0-R4 ladder, with the used rungs lit."),
                          ("final_panel", "The corridor at the final tick.")):
@@ -381,9 +484,16 @@ def report_blocks(cases, figsets, summaries, altered_rows, experiment,
     out.append(("code", f"git clone {repo}\n"
                         "cd AS_Assignment && pip install -r requirements.txt\n"
                         "python run_demo.py --compare --viz --outdir outputs\n"
-                        "python run_demo.py --choke --compare --viz\n"
+                        "python run_demo.py --choke --compare --viz "
+                        "--outdir outputs/choke\n"
                         "python experiments.py --sweep grid --seeds 10 --plots\n"
                         "python make_report.py --data outputs --zip"))
+    out.append(("p", "The animated GIFs of the shifted warehouse are "
+                     "`outputs/negotiate/animation.gif` and "
+                     "`outputs/bfs/animation.gif`; the corridor showcase is "
+                     "`outputs/choke/negotiate/animation.gif`. Pass "
+                     "`--open-warehouse` to run the same shift on the open "
+                     "floor instead of the closed aisle."))
     out.append(("h2", "9. References"))
     out.append(("code", "UCPOP (1992); Weld (1994); Kambhampati & Hendler "
                         "(1992); Fox et al. (2006); Silver (2005); Hoenig et al. "
@@ -539,8 +649,12 @@ def write_pdf(path: str, blocks: Sequence[tuple], outdir: str,
     doc = SimpleDocTemplate(path, pagesize=A4, title="Repair report",
                             author="AS assignment",
                             subject=f"SPEC 15 report - {repo or REPO_URL}",
-                            onFirstPage=footer, onLaterPages=footer)
-    doc.build(story)
+                            # keep the page streams uncompressed: the footer
+                            # (and every table cell) then stays searchable in
+                            # the PDF bytes, which is what makes the "the link
+                            # is on every page" claim checkable
+                            pageCompression=0)
+    doc.build(story, onFirstPage=footer, onLaterPages=footer)
     return path
 
 
@@ -614,11 +728,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--outdir", default=os.path.join("outputs", "report"))
     ap.add_argument("--data", default="outputs",
                     help="directory holding results.csv / run_meta.json / *.png")
-    ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--agents", type=int, default=8)
-    ap.add_argument("--size", type=int, default=28)
-    ap.add_argument("--disruptions", type=int, default=5,
-                    help="route blockages in case study A")
+    ap.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    ap.add_argument("--agents", type=int, default=DEFAULT_AGENTS)
+    ap.add_argument("--size", type=int, default=DEFAULT_HW)
+    ap.add_argument("--disruptions", type=int, default=DEFAULT_BLOCKAGES,
+                    help="route blockages in case study A (the demo default)")
     ap.add_argument("--mode", default="negotiate")
     ap.add_argument("--choke-agents", type=int, default=4)
     ap.add_argument("--no-pdf", action="store_true")

@@ -174,7 +174,8 @@ def choke_showcase(n_agents: int = 4, seed: int = 0) -> dict:
 def blockages_on_routes(plans: Dict[int, List], n: int,
                         rng: np.random.Generator, *,
                         lead: int = 3, duration: int = 6,
-                        t_min: int = 5) -> List:
+                        t_min: int = 5,
+                        avoid: Sequence[Cell] = ()) -> List:
     """``n`` blockages placed *on* an agent's route (``SPEC`` 10).
 
     :func:`disruptions.random_blockages` picks free cells at random, so most of
@@ -183,12 +184,20 @@ def blockages_on_routes(plans: Dict[int, List], n: int,
     ``lead`` before the agent arrives, so the window always contains the step
     and the repair loop really has to react -- which is what makes a
     multi-pass case study (and its four repair cards) reproducible.
+
+    ``avoid`` cells are never chosen.  It is normally the single door of a
+    closed aisle: sealing the only crossing *disconnects* the map, and no local
+    repair can undo a permanent removal of the last edge (the fleet would just
+    wait out its budget).
     """
     from disruptions import BlockageEvent
 
+    skip = set(avoid)
     cand: List[tuple] = []
     for aid in sorted(plans):
         for s in (plans.get(aid) or []):
+            if s.cell in skip:
+                continue
             if s.t >= t_min and s.action in ("MOVE", "WAIT", "PICK", "DROP"):
                 cand.append((s.cell, s.t))
     seen: set = set()
@@ -209,4 +218,127 @@ def blockages_on_routes(plans: Dict[int, List], n: int,
         out.append(BlockageEvent(cell, max(1, t - lead), duration))
     out.sort(key=lambda e: (e.t0, e.cell))
     return out
+
+
+# ----------------------------------------------------------------------
+# the congested, disrupted warehouse of the demo
+# ----------------------------------------------------------------------
+def aisle_closure_grid(H: int = 16, W: int = 16,
+                       rng: Optional[np.random.Generator] = None,
+                       door_col: Optional[int] = None,
+                       door_row: Optional[int] = None
+                       ) -> "tuple[np.ndarray, Cell]":
+    """The usual shelf layout with one *aisle* taken out of service.
+
+    A real warehouse loses throughput to exactly this: a cross-aisle closed for
+    maintenance, leaving a single gap the whole fleet has to funnel through.
+    Shelf column ``door_col`` is walled off except at ``(door_row, door_col)``,
+    so the two halves of the map share one crossing -- which is what turns a
+    quiet open warehouse into a congested one (agents queue, ``waiting_for``
+    grows) where holders really do clash (so the protocol speaks).
+
+    Returns ``(grid, door)``.  ``door_row`` defaults to the middle aisle row
+    whose two neighbours are both free, so the door is always passable;
+    ``rng`` only feeds :func:`world.generate_grid`.
+    """
+    from world import FREE, SHELF, generate_grid
+
+    if rng is None:
+        rng = np.random.default_rng(0)
+    if door_col is None:
+        door_col = W // 2
+    grid = generate_grid(H, W, rng)
+    grid[:, door_col] = SHELF
+    passable = [r for r in range(1, H - 1)
+                if grid[r, door_col - 1] == FREE and grid[r, door_col + 1] == FREE]
+    if door_row is None:
+        door_row = passable[len(passable) // 2] if passable else H // 2
+    grid[door_row, door_col] = FREE
+    return grid, (door_row, door_col)
+
+
+def warehouse_profile(cfg, plans: Dict[int, Optional[List]],
+                      rng: np.random.Generator, *,
+                      n_blockages: int = 6, n_breakdowns: int = 2,
+                      n_emergencies: int = 1,
+                      avoid: Sequence[Cell] = ()) -> Dict[str, list]:
+    """A realistic disruption profile for the warehouse demo (``SPEC`` 10).
+
+    Real operators do not run an "all clear" shift: aisles get closed, robots
+    break down and one is called away to a spill.  This builds exactly that set
+    of events so the metrics panel shows all five counters instead of the five
+    zeros of a silent run:
+
+    * ``n_blockages`` closures placed *on* the routes
+      (:func:`blockages_on_routes`), so every one of them really bites.  Cells
+      in ``avoid`` (normally the single door of :func:`aisle_closure_grid`) are
+      never closed: sealing the last crossing would disconnect the map;
+    * ``n_breakdowns`` robots that stop at the same early tick (a shared
+      charging-rail trip stops several at once) for
+      ``cfg.breakdown_duration_range[0]`` ticks;
+    * ``n_emergencies`` robots diverted to a marshalling cell early on.
+
+    Returns ``{"blockages": [...], "accidents": [...],
+    "emergencies": [...]}``.
+    """
+    from disruptions import AccidentEvent, EmergencyEvent
+
+    live = {a: s for a, s in plans.items() if s}
+    horizon = max([20] + [s[-1].t for s in live.values()])
+    ids = sorted(live) or list(range(cfg.n_agents))
+    blockages = blockages_on_routes(plans, n_blockages, rng, avoid=avoid)
+    t_break = max(2, horizon // 6)
+    hold = int(cfg.breakdown_duration_range[0])
+    accidents = [AccidentEvent(ids[i % len(ids)], t_break, hold)
+                 for i in range(n_breakdowns)]
+    t_emg = max(4, horizon // 4)
+    emergencies = [EmergencyEvent(ids[(1 + i) % len(ids)], t_emg,
+                                  int(cfg.breakdown_duration_range[0]))
+                   for i in range(n_emergencies)]
+    return {"blockages": blockages, "accidents": accidents,
+            "emergencies": emergencies}
+
+
+def warehouse_shift(cfg, rng: Optional[np.random.Generator] = None, *,
+                    n_blockages: int = 6, n_breakdowns: int = 2,
+                    n_emergencies: int = 1, open_warehouse: bool = False,
+                    max_nodes: int = 20_000) -> Dict[str, object]:
+    """The congested, disrupted shift that ``run_demo.py`` and the report run.
+
+    One place for the whole instance -- the closed aisle
+    (:func:`aisle_closure_grid`), the fleet (:func:`world.build_world`), the
+    task assignment, the baseline plans (:func:`peg.peg_solve`) and the
+    disruption profile (:func:`warehouse_profile`) -- so that the animated
+    demo, the report panels and the tests cannot drift apart.
+
+    ``open_warehouse`` restores the plain open warehouse of :mod:`world` (the
+    old, silent demo); the blockages then avoid nothing.  ``rng`` defaults to
+    ``np.random.default_rng(cfg.seed)`` and is consumed in this exact order, so
+    the instance is reproducible from the seed alone.
+
+    Returns a dict with ``grid``/``door`` (``None`` when open), ``world``,
+    ``tasks``, ``parking``, ``per_agent``, ``plans``, ``failed`` and
+    ``profile``.
+    """
+    from peg import peg_solve
+    from world import assign_tasks, build_world
+
+    if rng is None:
+        rng = np.random.default_rng(cfg.seed)
+    grid: Optional[np.ndarray] = None
+    door: Optional[Cell] = None
+    if not open_warehouse:
+        grid, door = aisle_closure_grid(cfg.H, cfg.W, rng)
+    world, tasks, parking = build_world(cfg, rng, grid=grid)
+    per_agent = assign_tasks(tasks, parking, rng)
+    plans, failed = peg_solve(world, per_agent, parking, max_nodes=max_nodes)
+    profile = warehouse_profile(cfg, plans, np.random.default_rng(cfg.seed + 1),
+                               n_blockages=n_blockages,
+                               n_breakdowns=n_breakdowns,
+                               n_emergencies=n_emergencies,
+                               avoid=[door] if door is not None else ())
+    return {"grid": grid, "door": door, "world": world, "tasks": tasks,
+            "parking": parking, "per_agent": per_agent, "plans": plans,
+            "failed": failed, "profile": profile}
+
 

@@ -168,6 +168,26 @@ def test_mp4_export_when_ffmpeg_is_present(tmp_path):
     assert os.path.getsize(out) > 0
 
 
+def test_animations_run_at_the_slow_readable_rate(tmp_path):
+    """One frame == one tick, and the default export is deliberately slow."""
+    import inspect
+
+    assert viz.ANIM_FPS == 4, "4 fps = 0.25 s per tick (readable dialogue)"
+    for fn in (viz.render_gif, viz.render_mp4, viz.interactive):
+        assert inspect.signature(fn).parameters["fps"].default == viz.ANIM_FPS
+
+    # the duration really is frames / fps, i.e. twice a plain 8 fps export
+    (cfg, world, tasks, parking, plans, sim, records, final,
+     events) = _repaired()
+    frames = viz.build_frames(world, final, tasks, parking,
+                              traces=sim.traces, horizon=12)
+    slow = str(tmp_path / "slow.gif")
+    viz.render_gif(frames, world, slow, max_frames=12)
+    from PIL import Image
+    with Image.open(slow) as im:
+        assert im.info["duration"] == 1000 // viz.ANIM_FPS
+
+
 
 # ----------------------------------------------------------------------
 # plan-space views

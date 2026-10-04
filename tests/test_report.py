@@ -78,6 +78,30 @@ def test_markdown_pdf_and_zip_are_written(tmp_path):
     assert any(n.startswith("repair/") for n in names)
 
 
+def test_the_report_names_the_github_repository(tmp_path):
+    """The PDF must carry the repo link (SPEC 15: "how to run + demo link")."""
+    context = make_report.build_context()
+    repo = context["repo"]
+    assert repo.startswith("https://") and "github.com" in repo
+    assert not repo.endswith(".git") and repo == make_report._git_remote()
+
+    _c, _f, _s, _a, blocks = _blocks(str(tmp_path))
+    links = [b for b in blocks if b[0] == "link"]
+    assert links, "the report must name the repository"
+    assert links[0][1] == repo and links[0][2] == repo
+
+    md = make_report.write_markdown(str(tmp_path / "report.md"), blocks)
+    text = open(md).read()
+    assert f"[{repo}]({repo})" in text
+    assert f"git clone {repo}" in text
+
+    pdf = make_report.write_pdf(str(tmp_path / "report.pdf"), blocks,
+                                str(tmp_path), repo=repo)
+    raw = open(pdf, "rb").read()
+    assert repo.encode() in raw, "the footer/link must be in the PDF itself"
+    assert b"page 1" in raw
+
+
 def test_experiment_section_is_optional(tmp_path):
     _c, _f, _s, _a, blocks_no = _blocks(str(tmp_path), experiment=None)
     assert any("experiments.py" in str(b) for b in blocks_no), \

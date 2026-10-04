@@ -20,7 +20,8 @@ world.py ──▶ pocl.py ──▶ peg.py ──▶ planner.py ──▶ sim.p
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
 
-python run_demo.py                                  # plan + simulate 8 agents
+python run_demo.py                                  # congested shift: 16x16, 12 robots
+python run_demo.py --open-warehouse                 # the old, silent open warehouse
 python run_demo.py --agents 20 --tasks-per-agent 3  # bigger instance
 python run_demo.py --disruptions 3 --accident 1 --emergency 2
 python run_demo.py --disruptions 3 --accident 1 --emergency 2 --compare
@@ -203,10 +204,17 @@ and `python run_demo.py --viz --outdir outputs` writes the whole set into
 recorded.
 Negotiation arrows and bubbles appear whenever the protocol actually speaks:
 with an open grid the initiator usually detours for less than `lambda_soft`, so
-proposals are only needed when a *holder parks in the corridor*. That is exactly
-what `scenarios.py` builds — `parked_holder_scenario` (the case asserted by
-`tests/test_negotiation.py`) and the `--choke` showcase — and why the plain demo
-honestly reports `0 messages`.
+proposals are only needed when a *holder parks in the corridor*. The default
+shift therefore closes one aisle
+(`scenarios.aisle_closure_grid`): the fleet funnels through a single door,
+holders clash there and the protocol answers — on the shipped seed
+(`run_demo.DEFAULT_SEED`) the `SPEC` §11 panel shows 12/12 altered agents,
+17 protocol messages (`bfs`: 33), 9 disruptions, 4 closed cells and 5 queueing
+pairs at once. `--open-warehouse` restores the open grid, where a repair is
+usually a silent local detour and the panel honestly reports `0 messages`.
+`scenarios.py` builds the *guaranteed* cases as well —
+`parked_holder_scenario` (the case asserted by `tests/test_negotiation.py`) and
+the `--choke` showcase, where the ladder finds no hard candidate at all.
 
 ## Experiments and report
 

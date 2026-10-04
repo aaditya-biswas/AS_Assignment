@@ -75,7 +75,7 @@ TASK_STATUS_C = {TaskStatus.PENDING.value: "#7d8b96",
 GRID_SYMBOLS: Tuple[Tuple[str, str], ...] = (
     ("shelf", "shelf"),
     ("agent", "agent (ring = altered cat.)"),
-    ("tote", "carrying tote"),
+    ("tote", "carrying item"),
     ("breakdown", "breakdown"),
     ("pickup", "pickup cell"),
     ("deliver_pending", "deliver: pending"),
@@ -270,6 +270,8 @@ def build_frames(
     msgs = list(getattr(log, "messages", ()) or ())
 
     frames: List[dict] = []
+    blocked_peak = 0
+    waiting_peak = 0
     for t in range(horizon + 1):
         blocked = []
         for cell, windows in sorted(world.blocked_until.items()):
@@ -332,6 +334,12 @@ def build_frames(
                                  if getattr(r, "t", 0) <= t
                                  for a in getattr(r, "altered_plan_ids",
                                                   [])})
+        #: the two *instantaneous* counters (live blocked cells, live waiting
+        #: pairs) fall back to zero once the disruption is over, which makes a
+        #: busy run look idle in its final frame.  The running maxima ride
+        #: along so the metrics panel can show the worst case that was seen.
+        blocked_peak = max(blocked_peak, len(blocked))
+        waiting_peak = max(waiting_peak, len(waiting_for))
         frames.append({
             "t": t,
             "agents": agents,
@@ -356,6 +364,10 @@ def build_frames(
                 "altered_so_far": len(altered_so_far),
                 "messages_so_far": sum(1 for m in msgs if m.t <= t),
                 "disruptions_so_far": sum(1 for tick in ev_tick if tick <= t),
+                "blocked_now": len(blocked),
+                "blocked_peak": blocked_peak,
+                "waiting_now": len(waiting_for),
+                "waiting_peak": waiting_peak,
             },
         })
 
@@ -713,8 +725,8 @@ def _metrics_text(frame: dict) -> str:
             f"altered so far {c['altered_so_far']}\n"
             f"messages {c['messages_so_far']}\n"
             f"disruptions {c['disruptions_so_far']}\n"
-            f"blocked cells {len(frame['blocked'])}\n"
-            f"waiting pairs {len(frame['waiting_for'])}")
+            f"blocked cells {c['blocked_now']} (peak {c['blocked_peak']})\n"
+            f"waiting pairs {c['waiting_now']} (peak {c['waiting_peak']})")
 
 
 def _log_text(frames: Sequence[dict], t: int, max_lines: int = 12) -> str:

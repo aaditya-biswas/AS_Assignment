@@ -206,14 +206,19 @@ def sample_from(pool, k: int, rng: np.random.Generator) -> List:
     return out[:k]
 
 
-def build_world(cfg, rng: np.random.Generator = None):
+def build_world(cfg, rng: np.random.Generator = None, *, grid=None):
     """Return ``(world, tasks, parking)`` for a scenario seeded by ``cfg.seed``.
 
-    ``parking[i]`` is the dedicated parking cell of agent ``i``.
+    ``parking[i]`` is the dedicated parking cell of agent ``i``.  ``grid``
+    overrides the generated aisle-and-shelf layout (the demo's congested
+    warehouse walls one aisle off except for a single door, see
+    :func:`scenarios.aisle_closure_grid`); every other step of the scenario
+    build -- task sampling, parking, the connectivity check -- is unchanged.
     """
     if rng is None:
         rng = np.random.default_rng(cfg.seed)
-    grid = generate_grid(cfg.H, cfg.W, rng)
+    if grid is None:
+        grid = generate_grid(cfg.H, cfg.W, rng)
     world = World(grid)
     if not world.connected():
         raise RuntimeError("generated map free space is not a single component")
