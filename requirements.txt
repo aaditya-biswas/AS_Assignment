@@ -1,0 +1,9 @@
+# Core dependencies for the warehouse repair project.
+# Python 3.12 recommended (3.10+ required). ffmpeg is optional (MP4 export).
+numpy>=1.26
+matplotlib>=3.8
+pandas>=2.1
+pillow>=10.0
+pytest>=8.0
+reportlab>=4.0
+networkx>=3.2
