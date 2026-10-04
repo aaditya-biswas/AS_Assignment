@@ -8,8 +8,6 @@ lets the initiator through, and every message lands in
 """
 from __future__ import annotations
 
-import numpy as np
-
 from disruptions import AccidentEvent
 from negotiation import (ABORT, ACCEPT, COMMIT, MESSAGE_TYPES, PROPOSE_ORDER,
                          PROPOSE_REROUTE, REJECT, Negotiation, first_clash,
@@ -17,8 +15,8 @@ from negotiation import (ABORT, ACCEPT, COMMIT, MESSAGE_TYPES, PROPOSE_ORDER,
 from modify import Disruption, repair_schedule
 from planner import PlanStep, plan_agent, plan_to_path
 from reservation import ReservationTable
+from scenarios import corridor_world, parked_holder_scenario
 from sim import simulate_scenario
-from world import Task, World
 
 
 # ----------------------------------------------------------------------
@@ -41,11 +39,9 @@ def _accept(*, distance: int = 1, comm_radius: int = 6, replan=(0, 1),
         comm_radius=comm_radius, **kw)
 
 
-def _corridor() -> World:
+def _corridor():
     """An 8x8 world whose only crossing between the halves is ``(3, 3)``."""
-    grid = np.zeros((8, 8), dtype=np.int8)
-    grid[[r for r in range(8) if r != 3], 3] = 1
-    return World(grid)
+    return corridor_world(8, 8, door_col=3, door_row=3)
 
 
 def _parked_holder_scenario():
@@ -54,19 +50,9 @@ def _parked_holder_scenario():
     Agent 1 can only reach its parking cell through ``(3, 3)``, which agent 0
     books forever.  Both agents are disabled at t=2 (0 until t=6, 1 until
     t=10), so agent 1 needs a *negotiated* grant: there is no hard candidate.
+    Shared with ``run_demo.py --choke`` via :mod:`scenarios`.
     """
-    world = _corridor()
-    parking = [(3, 3), (0, 0)]
-    tasks = {0: [Task(0, (1, 1), (2, 1))], 1: []}
-    res = ReservationTable()
-    plans = {0: plan_agent(world, res, 0, (0, 0), parking[0], tasks[0], 0,
-                           T_limit=600)}
-    res.add_path(0, plan_to_path(plans[0]), park=True)
-    plans[1] = plan_agent(world, res, 1, (7, 4), parking[1], tasks[1], 0,
-                          T_limit=600)
-    res.add_path(1, plan_to_path(plans[1]), park=True)
-    assert plans[0] is not None and plans[1] is not None
-    return world, plans, tasks, parking
+    return parked_holder_scenario()
 
 
 # ----------------------------------------------------------------------

@@ -434,6 +434,8 @@ def repair_schedule(
     hold_until = dict(hold_until or {})
     event = "+".join(sorted({d.kind for d in disruptions})) or "none"
     log = message_log if message_log is not None else Negotiation(t=t_freeze)
+    log.t = t_freeze        # stamp this pass' messages with the pass tick, so a
+    #                         caller-supplied log replays correctly in the viz
 
     frozen = {aid: freeze(plans.get(aid), t_freeze) for aid in range(n)}
     rem = {aid: pending_tasks(plans.get(aid), tasks_by_agent.get(aid, []), t_freeze)

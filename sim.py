@@ -270,7 +270,8 @@ def simulate_scenario(
         for aid, steps in plans.items():
             if steps and any(s.cell == ev.cell and ev.t0 <= s.t < ev.t1
                              for s in steps):
-                events.append(Disruption("blockage", aid, ev.t0))
+                events.append(Disruption("blockage", aid, ev.t0,
+                                         duration=ev.duration, cell=ev.cell))
 
     by_t: Dict[int, List[object]] = {}
     for d in events:

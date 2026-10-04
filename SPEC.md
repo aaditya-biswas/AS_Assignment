@@ -337,22 +337,35 @@ shelves/parking, interpolated agent motion, pickup/delivery markers, carried
 item, dotted future paths (toggle `p`), red hatched blocked cells with
 countdown, breakdown X, emergency ring, message arrows, metrics panel, event
 log, cumulative line plot. Keys: space, arrows, `+/-`, `p`, `m`, `s`, and v2's
-`g` (waiting arrows), `n` (cycle agent), `o` (POP panel), `r` (replay phases),
+`g` (waiting arrows), `m` (message arrows), `c` (message bubbles), `d` (taskboard), `l` (log <->>
+protocol dialogue), `n` (cycle agent), `o` (POP panel), `r` (replay phases),
 `t` (Gantt).
 
 v2 additions: waiting-for arrows (thin arrow to the `res` predecessor),
 altered-category colours (altered_plan = thick yellow, delayed_only = thin
-dashed orange), repair freeze-frames for the five phases with a phase banner
-and rung label, and plan-space views (`viz_plan.py`): POP graph (networkx
-layered layout), Gantt before/after, and 3-panel "repair cards".
+dashed orange), message arrows coloured by protocol type, **message bubbles**
+(`viz.agent_message_labels`) — a rounded bubble over *both* endpoints of every
+message visible this tick, the sender marked `»` and the receiver `«`, coloured
+by `MSG_COLORS[kind]` and folded into `+N` when a tick is busy (`c` toggles
+them), repair freeze-frames
+for the five phases with a phase banner and rung label, a bottom **fleet
+taskboard** (one cell per agent: phase, current task, target, delivery
+progress), a **protocol-dialogue** panel (`viz.dialogue_lines`: the speech acts
+with their `detail`, plus one repair line per disruption, so a locally-resolved
+pass still shows its repair line), and plan-space views (`viz_plan.py`): POP
+graph (networkx layered layout), Gantt before/after, 3-panel "repair cards" and
+the message **sequence diagram** (`sequence_figure`).
 
 Export: `render_gif` (PillowWriter), `render_mp4` (FFMpegWriter if present),
 `screenshots` (t=0, before/at/after disruption, final), before/after panels,
-and `run_demo.py --compare` (negotiate vs global side by side). Headless via
+and `run_demo.py --compare` (negotiate vs global side by side). `run_demo.py
+--choke` runs the `scenarios.py` choke point — where the protocol is forced to
+speak — instead of the (usually silent) random warehouse. Headless via
 `matplotlib.use("Agg")`.
 
 Trace frame schema: `{t, agents:[{id,pos,state,carrying_task_id,plan_future,
-altered_flash,broken}], blocked:[{cell,until}], tasks:[...], events:[...],
+task:{task_id,phase,target,done,total},altered_flash,broken}],
+blocked:[{cell,until}], tasks:[...], events:[...],
 messages:[...], waiting_for:[(a,b)], categories:{id:cat}, repair_log:[...],
 counters:{done_tasks,total_tasks,altered_so_far,messages_so_far,
 disruptions_so_far}}`.

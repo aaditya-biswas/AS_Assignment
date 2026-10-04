@@ -22,7 +22,7 @@ re-running the planner.
 from __future__ import annotations
 
 import os
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import matplotlib
 
@@ -30,6 +30,7 @@ matplotlib.use("Agg")                    # headless: never needs a display
 
 import matplotlib.pyplot as plt                     # noqa: E402
 from matplotlib.animation import FFMpegWriter, PillowWriter   # noqa: E402
+from matplotlib.colors import ListedColormap        # noqa: E402
 from matplotlib.patches import Circle, Rectangle    # noqa: E402
 
 from metrics import (ALTERED_PATH, ALTERED_PLAN, DELAYED_ONLY, UNCHANGED,
@@ -57,10 +58,30 @@ CAT_STYLE = {
 
 ACTION_C = {MOVE: "#2f81f7", WAIT: "#4a5a66", PICK: "#3fb950", DROP: "#d29922"}
 
+#: shelf map: 0 = free (background), 1 = shelf
+GRID_CMAP = ListedColormap([BG, SHELF_C])
+
 #: how long a negotiation arrow stays visible in the animation
 MESSAGE_HOLD = 6
 #: dotted future paths are truncated to this many ticks
 FUTURE_TICKS = 30
+
+#: colour of a protocol message by type (``negotiation.MESSAGE_TYPES``)
+MSG_COLORS = {"PROPOSE_ORDER": "#ffd54f", "PROPOSE_REROUTE": "#ffb74d",
+              "ACCEPT": "#3fb950", "REJECT": "#ff5c4d",
+              "COMMIT": "#58a6ff", "ABORT": "#b23b2e"}
+#: short on-grid label of a protocol message (``negotiation.MESSAGE_TYPES``)
+MSG_ABBR = {"PROPOSE_ORDER": "ORDER", "PROPOSE_REROUTE": "REROUTE",
+            "ACCEPT": "ACCEPT", "REJECT": "REJECT",
+            "COMMIT": "COMMIT", "ABORT": "ABORT"}
+#: at most this many speech bubbles per agent and tick (the rest fold into +N)
+MSG_LABELS_MAX = 2
+#: directional glyph of a bubble: the sender speaks, the receiver is told
+MSG_GLYPH_OUT = "\u00bb"
+MSG_GLYPH_IN = "\u00ab"
+#: short label of every activity phase of the per-agent taskboard
+PHASE_ABBR = {"TO_PICKUP": "get ", "TO_DELIVER": "haul", "TO_PARK": "park",
+              "IDLE": "idle", "DONE": "done", "BROKEN": "BRKN"}
 
 
 # ----------------------------------------------------------------------
@@ -100,8 +121,43 @@ def _carrying(steps: Optional[Sequence[PlanStep]], t: int) -> Optional[int]:
     return item
 
 
+def _activity_index(steps):
+    """Pick/drop tick per item of one agent, ordered by plan position."""
+    picks: Dict[int, int] = {}
+    drops: Dict[int, int] = {}
+    for s in steps or ():
+        if s.action == PICK and s.item is not None:
+            picks.setdefault(s.item, s.t)
+        elif s.action == DROP and s.item is not None:
+            drops.setdefault(s.item, s.t)
+    order = sorted(set(picks) | set(drops),
+                   key=lambda i: (picks.get(i, 10 ** 9),
+                                  drops.get(i, 10 ** 9)))
+    return picks, drops, order
+
+
+def _activity_at(t: int, idx, task_by_id) -> dict:
+    """What one agent is doing at ``t``: task, phase, target, progress.
+
+    The phases are the ones a reviewer watches for -- heading to a pickup,
+    hauling to a delivery, parking, idle/done -- plus the delivery progress.
+    """
+    picks, drops, order = idx
+    done = sum(1 for i in order if drops.get(i, 10 ** 9) <= t)
+    for item in order:
+        if drops.get(item, 10 ** 9) > t:                 # still open
+            tk = task_by_id.get(item)
+            to_pickup = picks.get(item, 10 ** 9) > t
+            target = (tk.pickup if to_pickup else tk.delivery) if tk else None
+            return {"task_id": item,
+                    "phase": "TO_PICKUP" if to_pickup else "TO_DELIVER",
+                    "target": target, "done": done, "total": len(order)}
+    return {"task_id": None, "phase": "TO_PARK" if order else "IDLE",
+            "target": None, "done": done, "total": len(order)}
+
+
 def _serialize_event(ev) -> dict:
-    """``Event``/``Disruption`` -> plain dict, for the trace and the event log."""
+    """``Event``/``Disruption`` -> plain dict, for the trace and event log."""
     if hasattr(ev, "kind"):          # modify.Disruption (already normalized)
         return {"kind": ev.kind, "agent": ev.agent, "cell": ev.cell,
                 "t0": ev.t, "duration": ev.duration,
@@ -128,10 +184,11 @@ def _event_tick(ev) -> int:
 
 def _event_end(tick: int, ev) -> int:
     """Last tick at which the event is still active (``tick`` inclusive)."""
-    dur = int(getattr(ev, "duration", getattr(ev, "hold", 0)) or 0)
-    if hasattr(ev, "permanent") and getattr(ev, "permanent"):
+    dur = int(getattr(ev, "duration", 0) or 0)
+    hold = int(getattr(ev, "hold", 0) or 0)
+    if getattr(ev, "permanent", False):
         return 10 ** 9
-    return tick + max(0, dur - 1)
+    return tick + max(0, max(dur, hold) - 1)
 
 
 def build_frames(
@@ -171,6 +228,8 @@ def build_frames(
         traces = {a: _trace(plans.get(a), horizon) for a in ids}
     categories = _categories(prev, plans, t_freeze, disrupted, ids)
     timeline = {a: _agent_timeline(plans.get(a)) for a in ids}
+    task_by_id = {tk.id: tk for tk in tasks}
+    act_idx = {a: _activity_index(plans.get(a)) for a in ids}
     finish = {a: (plans[a][-1].t if plans.get(a) else None) for a in ids}
     ev_tick = [_event_tick(e) for e in events]
     msgs = list(getattr(log, "messages", ()) or ())
@@ -210,6 +269,9 @@ def build_frames(
                 if tr[tt] != pos:
                     nxt = tr[tt]
                     break
+            act = _activity_at(t, act_idx[a], task_by_id)
+            if state == "DONE":
+                act = dict(act, phase="DONE", task_id=None, target=None)
             agents.append({
                 "id": a,
                 "pos": pos,
@@ -217,6 +279,7 @@ def build_frames(
                 "carrying_task_id": _carrying(plans.get(a), t),
                 "plan_future": tr[t + 1: t + 1 + FUTURE_TICKS],
                 "next": nxt,
+                "task": act,
                 "altered_flash": a in set(disrupted) and t >= t_freeze,
                 "broken": a in broken,
             })
@@ -321,15 +384,17 @@ def agent_color(aid: int) -> tuple:
     return plt.get_cmap("tab20")(aid % 20)
 
 
-def _grid_ax(ax, world: World, title: Optional[str] = None) -> None:
-    """Dark grid with shelves; row 0 on top (``(row, col)`` coordinates)."""
+def grid_ax(ax, world: World, title: Optional[str] = None) -> None:
+    """Dark grid with shelves; row 0 on top (``(row, col)`` coordinates).
+
+    The shelves are one ``imshow`` rather than a patch per cell: the animation
+    re-lays the panel out every tick, so the per-cell loop dominated rendering.
+    """
     H, W = world.H, world.W
     ax.set_facecolor(BG)
-    for r in range(H):
-        for c in range(W):
-            if world.grid[r, c] == 1:
-                ax.add_patch(Rectangle((c - 0.5, r - 0.5), 1, 1, fc=SHELF_C,
-                                       ec=GRID_C, lw=0.4, zorder=1))
+    ax.imshow(world.grid, cmap=GRID_CMAP, origin="upper",
+              interpolation="nearest", extent=(-0.5, W - 0.5, H - 0.5, -0.5),
+              zorder=1)
     ax.set_xlim(-0.5, W - 0.5)
     ax.set_ylim(H - 0.5, -0.5)
     ax.set_aspect("equal")
@@ -363,16 +428,91 @@ def draw_blocked(ax, frame: dict) -> None:
     t = frame["t"]
     for b in frame["blocked"]:
         r, c = b["cell"]
-        ax.add_patch(Rectangle((c - 0.5, r - 0.5), 1, 1, fc=BLOCK_C, alpha=0.35,
-                               hatch="///", ec=BLOCK_C, lw=0.8, zorder=4))
+        ax.add_patch(Rectangle((c - 0.5, r - 0.5), 1, 1, fc=BLOCK_C,
+                               alpha=0.35, hatch="///", ec=BLOCK_C, lw=0.8,
+                               zorder=4))
         left = max(0, b["until"] - t + 1)
         ax.text(c, r, str(left), color="#ffdcd6", fontsize=6, ha="center",
                 va="center", zorder=6)
 
 
+def agent_message_labels(frame: dict) -> Dict[int, List[dict]]:
+    """Speech bubbles of this tick, keyed by the agent that shows them.
+
+    Every negotiation message is labelled over *both* of its endpoints: the
+    sender with ``role="out"`` (glyph :data:`MSG_GLYPH_OUT`) and the receiver
+    with ``role="in"`` (glyph :data:`MSG_GLYPH_IN`); the colour comes from
+    :data:`MSG_COLORS`.  A frame without messages yields ``{}``, so a silent
+    (R1/R2-hard) repair draws no bubble at all.
+
+    At most :data:`MSG_LABELS_MAX` bubbles are kept per agent; the surplus is
+    collapsed into a trailing ``+N`` entry so a busy tick stays readable.
+    """
+    out: Dict[int, List[dict]] = {}
+    for m in frame.get("messages", ()):
+        kind = m["kind"]
+        sender, receiver = m["sender"], m["receiver"]
+        base = {"kind": kind, "text": MSG_ABBR.get(kind, kind),
+                "detail": m.get("detail", "")}
+        out.setdefault(sender, []).append(
+            dict(base, role="out", glyph=MSG_GLYPH_OUT))
+        if receiver != sender:      # a self-message has only one bubble
+            out.setdefault(receiver, []).append(
+                dict(base, role="in", glyph=MSG_GLYPH_IN))
+    trimmed: Dict[int, List[dict]] = {}
+    for aid, labels in out.items():
+        if len(labels) > MSG_LABELS_MAX:
+            extra = len(labels) - (MSG_LABELS_MAX - 1)
+            labels = labels[: MSG_LABELS_MAX - 1] + [
+                {"kind": "_more", "text": f"+{extra}", "detail": "",
+                 "role": "mix", "glyph": ""}]
+        trimmed[aid] = labels
+    return trimmed
+
+
+def _draw_message_bubbles(ax, frame: dict, by_id: Dict[int, dict]) -> None:
+    """One rounded bubble above every agent that speaks or is spoken to.
+
+    Messages of the same kind are combined into a single bubble; multiple
+    kinds stack outwards.  On the top row the stack grows *downwards* so it
+    never clips out of the axes.  The bubble is a ``text`` with a rounded
+    ``bbox``, which keeps it a single artist per agent and kind.
+    """
+    for aid, items in sorted(agent_message_labels(frame).items()):
+        ag = by_id.get(aid)
+        if ag is None:
+            continue
+        r, c = ag["pos"]
+        groups: List[Tuple[str, List[dict]]] = []
+        for it in items:                    # group consecutive same-kind
+            if groups and groups[-1][0] == it["kind"]:
+                groups[-1][1].append(it)
+            else:
+                groups.append((it["kind"], [it]))
+        below = r <= 0                      # no room above the top row
+        step = 0.46
+        for gi, (kind, grp) in enumerate(groups):
+            dy = (r + 0.62 + gi * step) if below else (r - 0.62 - gi * step)
+            col = MSG_COLORS.get(kind, "#ffd54f")
+            text = "\n".join(f"{g['glyph']} {g['text']}".strip() for g in grp)
+            ax.plot([c, c], [dy, r + (0.42 if below else -0.42)], color=col,
+                    lw=0.6, alpha=0.6, zorder=11)
+            ax.text(c, dy, text, color=col, fontsize=5.0, ha="center",
+                    va="center", family="monospace", zorder=12,
+                    bbox=dict(boxstyle="round,pad=0.22", fc=PANEL, ec=col,
+                              lw=1.0, alpha=0.92))
+
+
 def draw_agents(ax, frame: dict, *, show_future: bool = True,
-                show_waiting: bool = True, carry_marker: bool = True) -> None:
-    """Agent discs, category rings, dotted futures, waiting/message arrows."""
+                show_waiting: bool = True, show_messages: bool = True,
+                show_message_labels: bool = True,
+                carry_marker: bool = True) -> None:
+    """Agent discs, category rings, dotted futures, waiting/message arrows.
+
+    With ``show_message_labels`` every agent that sends or receives a protocol
+    message this tick also gets a speech bubble over its disc (see
+    :func:`agent_message_labels`); the arrows stay either way.
+    """
     cats = frame["categories"]
     by_id = {ag["id"]: ag for ag in frame["agents"]}
     if show_future:
@@ -381,8 +521,8 @@ def draw_agents(ax, frame: dict, *, show_future: bool = True,
                 continue
             xs = [c for (_, c) in ag["plan_future"]]
             ys = [r for (r, _) in ag["plan_future"]]
-            ax.plot(xs, ys, ls=(0, (1, 2)), lw=0.8, color=agent_color(ag["id"]),
-                    alpha=0.6, zorder=2)
+            ax.plot(xs, ys, ls=(0, (1, 2)), lw=0.8, alpha=0.6, zorder=2,
+                    color=agent_color(ag["id"]))
     if show_waiting:
         for (a, b) in frame["waiting_for"]:
             if a not in by_id or b not in by_id:
@@ -392,18 +532,21 @@ def draw_agents(ax, frame: dict, *, show_future: bool = True,
                         arrowprops=dict(arrowstyle="->", color="#c9d1d9",
                                         lw=0.7, alpha=0.55,
                                         shrinkA=6, shrinkB=6), zorder=5)
-    for m in frame["messages"]:
-        src, dst = by_id.get(m["sender"]), by_id.get(m["receiver"])
-        if src is None or dst is None or src is dst:
-            continue
-        (r0, c0), (r1, c1) = src["pos"], dst["pos"]
-        ax.annotate("", xy=(c1, r1), xytext=(c0, r0),
-                    arrowprops=dict(arrowstyle="-|>", color="#ffd54f", lw=1.0,
-                                    alpha=0.8, linestyle=":",
-                                    shrinkA=7, shrinkB=7), zorder=7)
+    if show_messages:
+        for m in frame["messages"]:
+            src, dst = by_id.get(m["sender"]), by_id.get(m["receiver"])
+            if src is None or dst is None or src is dst:
+                continue
+            (r0, c0), (r1, c1) = src["pos"], dst["pos"]
+            col = MSG_COLORS.get(m["kind"], "#ffd54f")
+            ax.annotate("", xy=(c1, r1), xytext=(c0, r0),
+                        arrowprops=dict(arrowstyle="-|>", color=col, lw=1.0,
+                                        alpha=0.8, linestyle=":",
+                                        shrinkA=7, shrinkB=7), zorder=7)
     for ag in frame["agents"]:
         r, c = ag["pos"]
-        style = CAT_STYLE.get(cats.get(ag["id"], UNCHANGED), CAT_STYLE[UNCHANGED])
+        style = CAT_STYLE.get(cats.get(ag["id"], UNCHANGED),
+                              CAT_STYLE[UNCHANGED])
         ax.add_patch(Circle((c, r), 0.38, fc=agent_color(ag["id"]),
                             alpha=0.95, zorder=8, **style))
         if ag["broken"]:
@@ -413,7 +556,58 @@ def draw_agents(ax, frame: dict, *, show_future: bool = True,
                                    fc="#f0f6fc", ec="none", zorder=9))
         ax.text(c, r, str(ag["id"]), color="#0b0f13", fontsize=6, ha="center",
                 va="center", zorder=10)
+    if show_message_labels:
+        _draw_message_bubbles(ax, frame, by_id)
 
+
+
+def draw_taskbar(ax, frame: dict, *, max_cols: int = 20) -> None:
+    """Bottom strip: one cell per agent -- phase, task, target, progress.
+
+    Cells wrap onto a new row above ``max_cols`` agents, so an ``N=40`` sweep
+    still reads.  This is the fleet taskboard of an autonomous system: what
+    every robot is doing right now.
+    """
+    ax.set_facecolor(PANEL)
+    agents = frame["agents"]
+    per_row = max(1, min(max_cols, len(agents))) if agents else 1
+    rows = max(1, (len(agents) + per_row - 1) // per_row)
+    ax.set_xlim(0, per_row)
+    ax.set_ylim(0, rows)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for sp in ax.spines.values():
+        sp.set_color(GRID_C)
+    ax.set_title("fleet taskboard", color=FG, fontsize=8, loc="left")
+    for k, ag in enumerate(agents):
+        row = rows - 1 - (k // per_row)
+        col = k % per_row
+        act = ag.get("task") or {}
+        if ag["broken"]:
+            phase = "BROKEN"
+        elif ag["state"] == "DONE":
+            phase = "DONE"
+        else:
+            phase = act.get("phase", "IDLE")
+        ax.add_patch(Rectangle((col, row), 1.0, 1.0, fc="#101820", ec=GRID_C,
+                               lw=0.6, zorder=1))
+        ax.add_patch(Rectangle((col, row), 0.09, 1.0,
+                               fc=agent_color(ag["id"]), ec="none", zorder=2))
+        task = act.get("task_id")
+        target = act.get("target")
+        label = (f"a{ag['id']:<2d} {PHASE_ABBR.get(phase, phase):<4s} "
+                 f"{('t' + str(task)) if task is not None else '--':>3s} "
+                 f"{target if target else '-'}")
+        ax.text(col + 0.12, row + 0.63, label, color=FG, fontsize=5.0,
+                family="monospace", va="center", zorder=3)
+        done, total = act.get("done", 0), act.get("total", 0)
+        ax.text(col + 0.12, row + 0.27, f"{done}/{total} delivered",
+                color="#8b949e", fontsize=4.6, family="monospace",
+                va="center", zorder=3)
+        if total:
+            ax.add_patch(Rectangle((col + 0.12, row + 0.08),
+                                   0.84 * (done / total), 0.06,
+                                   fc="#3fb950", ec="none", zorder=3))
 
 
 def _metrics_text(frame: dict) -> str:
@@ -432,11 +626,11 @@ def _log_text(frames: Sequence[dict], t: int, max_lines: int = 12) -> str:
     for f in frames[:t + 1]:
         for ev in f["events"]:
             if ev["t0"] == f["t"]:
-                lines.append(f"t={f['t']:<4d} {ev['kind']:<9s} "
-                             f"a{ev['agent'] if ev['agent'] is not None else '-':<3} "
+                who = f"a{ev['agent']}" if ev["agent"] is not None else "-"
+                lines.append(f"t={f['t']:<4d} {ev['kind']:<9s} {who:<4s} "
                              f"{ev['cell'] if ev['cell'] else ''}")
         for r in f["repair_log"]:
-            if r["t"] == f["t"] and r not in lines:
+            if r["t"] == f["t"]:
                 lines.append(f"t={f['t']:<4d} repair   {r['level']:<3s} "
                              f"alt={len(r['altered'])}")
         for m in f["messages"]:
@@ -444,6 +638,34 @@ def _log_text(frames: Sequence[dict], t: int, max_lines: int = 12) -> str:
                 lines.append(f"t={f['t']:<4d} {m['kind']:<14s} "
                              f"{m['sender']}->{m['receiver']}")
     return "\n".join(lines[-max_lines:]) if lines else "(no events yet)"
+
+
+def dialogue_lines(frames: Sequence[dict], t: int, max_lines: int = 12) -> str:
+    """Protocol dialogue of the run so far (``SPEC.md`` 9.2 / 14.6).
+
+    Two kinds of line, both in tick order: a ``repair`` line per disruption
+    pass (rung, altered set, message counts) and one line per protocol message
+    with its human-readable ``detail``.  A pass that needs no dialogue still
+    shows its repair line -- which is the point: the protocol only speaks when
+    a holder has to yield.
+    """
+    lines: List[str] = []
+    for f in frames[:t + 1]:
+        for r in f["repair_log"]:
+            if r["t"] != f["t"]:
+                continue
+            msgs = ", ".join(f"{k}:{v}" for k, v in r["messages"].items() if v)
+            lines.append(f"t={f['t']:<4d} repair {r['level']:<3s} "
+                         f"alt={len(r['altered'])}  {msgs or '-'}")
+        for m in f["messages"]:
+            if m["t"] != f["t"]:
+                continue
+            arrow = f"a{m['sender']}->a{m['receiver']}"
+            detail = f"  {m['detail']}" if m["detail"] else ""
+            lines.append(f"t={f['t']:<4d} {arrow:<9s} {m['kind']:<14s}{detail}")
+    if not lines:
+        return "(no protocol messages yet)"
+    return "\n".join(lines[-max_lines:])
 
 
 def _cumulative(ax, frames: Sequence[dict], t: int) -> None:
@@ -463,27 +685,38 @@ def _cumulative(ax, frames: Sequence[dict], t: int) -> None:
 
 
 def layout_overview(fig, world: World, frames: Sequence[dict], t: int, *,
-                    title: Optional[str] = None) -> dict:
+                    title: Optional[str] = None, show_future: bool = True,
+                    show_waiting: bool = True, show_messages: bool = True,
+                    show_message_labels: bool = True,
+                    show_taskbar: bool = True,
+                    show_dialogue: bool = False) -> dict:
     """Draw the SPEC 11 panel of tick ``t`` onto the *existing* figure ``fig``.
 
-    Returns the axes by name (``grid``/``metrics``/``log``/``line``).  The
-    animation uses this directly (``fig.clf()`` then re-layout), so the panel
-    code is shared by the GIF, the MP4 and the PNG screenshots.
+    Returns the axes by name (``grid``/``metrics``/``log``/``line``/``taskbar``).
+    The animation uses this directly (``fig.clf()`` then re-layout), so the panel
+    code is shared by the GIF, the MP4 and the PNG screenshots.  The bottom
+    strip is the per-agent *taskboard* (what every robot is doing right now);
+    the log panel shows the event log or, with ``show_dialogue``, the protocol
+    dialogue.
     """
     fig.set_facecolor(BG)
     frame = frame_at(frames, t)
-    gs = fig.add_gridspec(3, 3, width_ratios=(2.4, 1.0, 1.0),
-                          height_ratios=(1.0, 1.2, 1.1), hspace=0.25, wspace=0.15)
-    ax_grid = fig.add_subplot(gs[:, 0:2])
+    gs = fig.add_gridspec(4, 3, width_ratios=(2.4, 1.0, 1.0),
+                          height_ratios=(1.0, 1.2, 1.1, 0.5), hspace=0.25,
+                          wspace=0.15)
+    ax_grid = fig.add_subplot(gs[0:3, 0:2])
     ax_m = fig.add_subplot(gs[0, 2])
     ax_log = fig.add_subplot(gs[1, 2])
     ax_line = fig.add_subplot(gs[2, 2])
+    ax_task = fig.add_subplot(gs[3, :]) if show_taskbar else None
 
-    _grid_ax(ax_grid, world, title or
+    grid_ax(ax_grid, world, title or
              f"warehouse  {world.H}x{world.W}   t={frame['t']}")
     draw_tasks(ax_grid, frame)
     draw_blocked(ax_grid, frame)
-    draw_agents(ax_grid, frame)
+    draw_agents(ax_grid, frame, show_future=show_future,
+                show_waiting=show_waiting, show_messages=show_messages,
+                show_message_labels=show_message_labels)
 
     ax_m.set_facecolor(PANEL)
     ax_m.axis("off")
@@ -497,34 +730,113 @@ def layout_overview(fig, world: World, frames: Sequence[dict], t: int, *,
 
     ax_log.set_facecolor(PANEL)
     ax_log.axis("off")
-    ax_log.set_title("event log", color=FG, fontsize=8, loc="left")
-    ax_log.text(0.02, 0.95, _log_text(frames, frame["t"]), color=FG, fontsize=7,
-                va="top", family="monospace", transform=ax_log.transAxes)
+    ax_log.set_title("protocol dialogue" if show_dialogue else "event log",
+                     color=FG, fontsize=8, loc="left")
+    ax_log.text(0.02, 0.95,
+                dialogue_lines(frames, frame["t"]) if show_dialogue
+                else _log_text(frames, frame["t"]),
+                color=FG, fontsize=7, va="top", family="monospace",
+                transform=ax_log.transAxes)
 
     _cumulative(ax_line, frames, frame["t"])
     ax_line.set_title("cumulative", color=FG, fontsize=8, loc="left")
-    return {"grid": ax_grid, "metrics": ax_m, "log": ax_log, "line": ax_line}
+    axes = {"grid": ax_grid, "metrics": ax_m, "log": ax_log, "line": ax_line}
+    if ax_task is not None:
+        draw_taskbar(ax_task, frame)
+        axes["taskbar"] = ax_task
+    return axes
 
 
 def plot_overview(world: World, frames: Sequence[dict], t: int, *,
                   figsize: Tuple[float, float] = (16, 9),
-                  title: Optional[str] = None) -> "plt.Figure":
-    """The base animation panel: grid + metrics + event log + cumulative plot."""
+                  title: Optional[str] = None, **kw) -> "plt.Figure":
+    """The base panel: grid + metrics + log + cumulative plot + taskboard.
+
+    ``**kw`` is forwarded to :func:`layout_overview` (``show_taskbar``,
+    ``show_dialogue``, ``show_waiting``, ``show_future``, ``show_messages``,
+    ``show_message_labels``).
+    """
     fig = plt.figure(figsize=figsize)
-    layout_overview(fig, world, frames, t, title=title)
+    layout_overview(fig, world, frames, t, title=title, **kw)
     return fig
+
+
+def interactive(frames: Sequence[dict], world: World, *,
+                figsize: Tuple[float, float] = (16, 9), fps: int = 8,
+                title: Optional[str] = None):
+    """Keyboard-driven playback of the panel (needs a GUI backend).
+
+    Keys: space play/pause, ``left``/``right`` step, ``p`` future paths,
+    ``g`` waiting arrows, ``m`` message arrows, ``c`` message bubbles,
+    ``d`` taskboard, ``l`` event log <-> protocol dialogue, ``s`` save a PNG.
+    """
+    from matplotlib.animation import FuncAnimation
+
+    st = {"t": 0, "play": True, "future": True, "waiting": True,
+          "messages": True, "msgtext": True, "taskbar": True,
+          "dialogue": False}
+    fig = plt.figure(figsize=figsize)
+
+    def draw(_t=None):
+        layout_overview(fig, world, frames, st["t"], title=title,
+                        show_future=st["future"], show_waiting=st["waiting"],
+                        show_messages=st["messages"],
+                        show_message_labels=st["msgtext"],
+                        show_taskbar=st["taskbar"],
+                        show_dialogue=st["dialogue"])
+        return []
+
+    def gen():
+        while True:
+            if st["play"]:
+                st["t"] = (st["t"] + 1) % len(frames)
+            yield st["t"]
+
+    def on_key(ev):
+        k = ev.key
+        if k == " ":
+            st["play"] = not st["play"]
+        elif k == "right":
+            st["play"] = False
+            st["t"] = min(len(frames) - 1, st["t"] + 1)
+        elif k == "left":
+            st["play"] = False
+            st["t"] = max(0, st["t"] - 1)
+        elif k == "p":
+            st["future"] = not st["future"]
+        elif k == "g":
+            st["waiting"] = not st["waiting"]
+        elif k == "m":
+            st["messages"] = not st["messages"]
+        elif k == "c":
+            st["msgtext"] = not st["msgtext"]
+        elif k == "d":
+            st["taskbar"] = not st["taskbar"]
+        elif k == "l":
+            st["dialogue"] = not st["dialogue"]
+        elif k == "s":
+            fig.savefig(f"frame_{st['t']:04d}.png", dpi=100, facecolor=BG)
+        fig.canvas.draw_idle()
+        draw()
+
+    fig.canvas.mpl_connect("key_press_event", on_key)
+    anim = FuncAnimation(fig, draw, frames=gen, interval=1000 / max(1, fps),
+                         cache_frame_data=False)
+    plt.show()
+    return anim
 
 
 def render_grid_frame(world: World, frame: dict, *,
                       figsize: Tuple[float, float] = (8, 8),
-                      title: Optional[str] = None) -> "plt.Figure":
+                      title: Optional[str] = None,
+                      show_message_labels: bool = True) -> "plt.Figure":
     """A single grid panel (used by the freeze-frames of a repair pass)."""
     fig = plt.figure(figsize=figsize, facecolor=BG)
     ax = fig.add_subplot(111)
-    _grid_ax(ax, world, title or f"t={frame['t']}")
+    grid_ax(ax, world, title or f"t={frame['t']}")
     draw_tasks(ax, frame)
     draw_blocked(ax, frame)
-    draw_agents(ax, frame)
+    draw_agents(ax, frame, show_message_labels=show_message_labels)
     fig.tight_layout()
     return fig
 
@@ -540,7 +852,7 @@ def _ensure_dir(path: str) -> None:
 
 
 def _animation(frames: Sequence[dict], world: World, figsize, title, fps):
-    """A ``FuncAnimation`` that re-lays out the panel on a persistent figure."""
+    """A ``FuncAnimation`` that re-lays out the panel on a persistent fig."""
     from matplotlib.animation import FuncAnimation
 
     fig = plt.figure(figsize=figsize)
@@ -593,9 +905,9 @@ def screenshots(frames: Sequence[dict], world: World, outdir: str, *,
     """PNG snapshots (``t=0``, before/at/after a disruption, final)."""
     os.makedirs(outdir, exist_ok=True)
     if ticks is None:
-        ev_ticks = sorted({f["t"] for f in frames if f["events"]})
-        ticks = [0] + [max(0, t - 1) for t in ev_ticks] + ev_ticks
-        ticks += [len(frames) - 1]
+        starts = sorted({ev["t0"] for f in frames for ev in f["events"]})
+        ticks = ([0] + [max(0, t - 1) for t in starts] + starts
+                 + [len(frames) - 1])
     out: List[str] = []
     for t in sorted({int(x) for x in ticks if 0 <= x < len(frames)}):
         fig = plot_overview(world, frames, t)
@@ -660,12 +972,12 @@ def gantt_panels(panels: Sequence[Tuple[str, Dict[int, List[PlanStep]]]], *,
     fig.axes[0].legend(handles=handles, fontsize=7, facecolor=PANEL,
                        labelcolor=FG, framealpha=0.6, ncol=4,
                        loc="upper right")
-    fig.tight_layout()
+    fig.subplots_adjust(left=0.05, right=0.99, top=0.92, bottom=0.08)
     return fig
 
 
 def _runs(steps: Optional[Sequence[PlanStep]]) -> List[Tuple[tuple, int, int]]:
-    """Run-length encode ``steps`` into ``((action, item), t0, t1)`` triples."""
+    """Run-length encode ``steps`` into ``((action, item), t0, t1)`` runs."""
     out: List[Tuple[tuple, int, int]] = []
     for s in steps or ():
         key = (s.action, s.item)
@@ -692,7 +1004,7 @@ def before_after_panels(world: World, before: Sequence[dict],
                                         ("after repair", after))):
         ax = fig.add_subplot(1, 2, k + 1)
         frame = frame_at(frames, t)
-        _grid_ax(ax, world, f"{name}   t={frame['t']}")
+        grid_ax(ax, world, f"{name}   t={frame['t']}")
         draw_tasks(ax, frame)
         draw_agents(ax, frame, show_waiting=False)
     fig.tight_layout()
